@@ -238,13 +238,15 @@ def main(FLAGS):
     feat_batch = [[trt_outputs[j][i] for j in range(len(trt_outputs))] for i in range(len(trt_outputs[0]))]
 
 
-    for idx, layers  in enumerate(feat_batch):
+    for idx, layers  in enumerate(feat_batch[0]):
         # print(idx, type(layers), len(layers))
         # for layer in layers:
         #     print(layer.shape)
         # print(layers)
         boxes, classes, scores = postprocessor.process(layers, (shape_orig_WH))
-    print((time.time()-post_time)/max_batch_size)
+    # print((time.time()-post_time)/max_batch_size)
+    print((time.time()-post_time))
+    print(boxes, classes, scores)
     exit()
 
     obj_detected_img = draw_bboxes(image_raw, boxes, scores, classes, ALL_CATEGORIES)

@@ -25,9 +25,8 @@ docker run --name=trt_1906py2 --rm -dit --privileged --runtime=nvidia -v ~/Deskt
 docker exec -it trt_1906py2 bash
 pip install wget onnx
 git clone https://github.com/royinx/trt_yolov3.git
-cp /sharefolder/yolov3.onnx /workspace/tensorrt/samples/python/yolov3_onnx/
-cd /workspace/tensorrt/samples/python/yolov3_onnx/
-python onnx_to_tensorrt.py --build --vram 10 --max_batch_size 64 -p fp16
+cp /sharefolder/yolov3.onnx trt_yolov3/ && cd trt_yolov3
+python onnx_to_tensorrt.py --build --vram 8 --max_batch_size 64 -p fp16
 ```
 
 -------------------------------------------------
