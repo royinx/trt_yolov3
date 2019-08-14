@@ -1,0 +1,6 @@
+*.pyc
+*.trt
+*.plan
+*.weights
+*.onnx
+core.*
