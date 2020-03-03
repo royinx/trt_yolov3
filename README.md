@@ -42,8 +42,9 @@ install gdb  `apt-get update && apt-get -y install gdb python2.7-dbg`
 $ cd <DIR>
 $ gdb python
 
+```
 (gdb) run XXX.py
 (gdb) generate-core-file
 (gdb) py-bt
 (gdb) q
-
+```
