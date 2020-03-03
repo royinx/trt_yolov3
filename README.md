@@ -30,8 +30,9 @@ python onnx_to_tensorrt.py --build --vram 8 --max_batch_size 64 -p fp16
 -------------------------------------------------
 
 
-##others 
-####how to debug core dump (inside container)
+## others 
+
+#### Debug core dump (inside container)
 
 commit new image and run at a new container 
 
