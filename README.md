@@ -6,7 +6,7 @@ docker pull nvcr.io/nvidia/tensorrt:19.06-py2
 ```
 
 
-## run container 
+## Run container 
 
 --privileged --runtime=nvidia 
 
@@ -30,7 +30,7 @@ python onnx_to_tensorrt.py --build --vram 8 --max_batch_size 64 -p fp16
 -------------------------------------------------
 
 
-## others 
+## Others 
 
 #### Debug core dump (inside container)
 
