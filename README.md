@@ -10,10 +10,10 @@ docker pull nvcr.io/nvidia/tensorrt:19.06-py2
 
 --privileged --runtime=nvidia 
 
-(19.02 for yolo2onnx , TRT 5.0.2 ,  onnx 1.3.0)
+(19.02 for yolo2onnx , TRT 5.0.2 ,  onnx 1.3.0 or 1.2.3 )
 ```shell
 docker run --rm -it --privileged --runtime=nvidia -v ~/Desktop/python:/sharefolder nvcr.io/nvidia/tensorrt:19.02-py2 bash
-pip install wget onnx==1.3.0 ( 1.2.3 or 1.3.0)
+pip install wget onnx==1.3.0 
 cd tensorrt/samples/python/yolov3_onnx/ && python yolov3_to_onnx.py
 cp yolov3.onnx /sharefolder/
 ```
