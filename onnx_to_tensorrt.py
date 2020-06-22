@@ -16,7 +16,10 @@ from common import *
 
 import time
 
+from line_profiler import LineProfiler
 
+# profile = LineProfiler()
+# @profile
 def allocate_buffers(engine):
 
     inputs = []
@@ -41,7 +44,7 @@ def allocate_buffers(engine):
             outputs.append(HostDeviceMem(host_mem, device_mem))
 
     return inputs, outputs, bindings, stream
-
+# @profile
 def do_inference(context, bindings, inputs, outputs, stream, batch_size=1):
 
     [cuda.memcpy_htod_async(inp.device, inp.host, stream) for inp in inputs]
@@ -57,6 +60,7 @@ def do_inference(context, bindings, inputs, outputs, stream, batch_size=1):
 
 TRT_LOGGER = trt.Logger()
 
+# @profile
 def draw_bboxes(image_raw, bboxes, confidences, categories, all_categories, bbox_color='blue'):
     '''
     Keyword arguments:
@@ -84,6 +88,7 @@ def draw_bboxes(image_raw, bboxes, confidences, categories, all_categories, bbox
 
     return image_raw
 
+# @profile
 def get_engine(onnx_file_path, FLAGS, engine_file_path=""):
     def build_engine():
         """Takes an ONNX file and creates a TensorRT engine to run inference with"""
@@ -144,20 +149,17 @@ def get_engine(onnx_file_path, FLAGS, engine_file_path=""):
         else:
             return build_engine()
 
+# @profile
 def main(FLAGS):
     """Create a TensorRT engine for ONNX-based YOLOv3-608 and run inference."""
     onnx_file_path = 'yolov3.onnx'
     engine_file_path = "yolov3.trt"
-    input_image_path = download_file('dog.jpg',
-        'https://github.com/pjreddie/darknet/raw/f86901f6177dfc6116360a13cc06ab680e0c86b0/data/dog.jpg', checksum_reference=None)
+    input_image_path = 'debug_image/test0.jpg'
     input_resolution_yolov3_HW = (608, 608)
     preprocessor = PreprocessYOLO(input_resolution_yolov3_HW)
     image_raw, image = preprocessor.process(input_image_path)
 
     shape_orig_WH = image_raw.size
-    print(image_raw)
-    print(type(shape_orig_WH))
-
     
     trt_outputs = []
 
@@ -179,48 +181,18 @@ def main(FLAGS):
     '''
 
     with get_engine(onnx_file_path, FLAGS, engine_file_path) as engine, \
-         engine.create_execution_context() as context:
-
+        engine.create_execution_context() as context:
         inputs, outputs, bindings, stream = allocate_buffers(engine)
         
-        print('Running inference on image {}...'.format(input_image_path))
-
+        # print('Running inference on image {}...'.format(input_image_path))
         max_batch_size = engine.max_batch_size
-        # print('******before******')
-        # print('inputs',inputs)
-        # print('************')
-        # print('inputs[0]',inputs[0])
-        # print('************')
-        
+        image=np.tile(image,[36,1,1,1])
         inputs[0].host = image
 
-        # print('******after******')
-        # print('inputs',inputs)
-        # print('************')
-        # print('inputs[0]',len(inputs[0].host))
-        # print('************')
-
-        count = 1
-        inf_batch = 1
-        start_time = time.time()
-        for _ in range(count):
-            trt_outputs = do_inference(context, bindings=bindings, inputs=inputs, outputs=outputs, stream=stream, batch_size=inf_batch)
-
-    print((time.time()-start_time)/count/inf_batch)
+        inf_batch = 36
+        trt_outputs = do_inference(context, bindings=bindings, inputs=inputs, outputs=outputs, stream=stream, batch_size=inf_batch)
 
     output_shapes = [(max_batch_size, 255, 19, 19), (max_batch_size, 255, 38, 38), (max_batch_size, 255, 76, 76)]
-
-    print('******************')
-    print(type(trt_outputs),len(trt_outputs))
-    for idx, value in enumerate(trt_outputs):
-        print(value.shape)
-        print(value.dtype)
-        # print(value)
-    # exit(0)
-    for output, shape in zip(trt_outputs, output_shapes):
-        print(output,shape)
-
-    # exit(0)
 
     trt_outputs = [output.reshape(shape) for output, shape in zip(trt_outputs, output_shapes)]  # [(1, 255, 19, 19), (1, 255, 38, 38), (1, 255, 76, 76)]
 
@@ -233,25 +205,16 @@ def main(FLAGS):
 
     postprocessor = PostprocessYOLO(**postprocessor_args)
 
-    post_time = time.time()
-
     feat_batch = [[trt_outputs[j][i] for j in range(len(trt_outputs))] for i in range(len(trt_outputs[0]))]
 
-
     for idx, layers  in enumerate(feat_batch):
-        # print(idx, type(layers), len(layers))
-        # for layer in layers:
-        #     print(layer.shape)
-        # print(layers)
         boxes, classes, scores = postprocessor.process(layers, (shape_orig_WH))
-    print((time.time()-post_time)/max_batch_size)
-    exit()
 
-    obj_detected_img = draw_bboxes(image_raw, boxes, scores, classes, ALL_CATEGORIES)
-    output_image_path = 'dog_bboxes.png'
-    obj_detected_img.save(output_image_path, 'PNG')
+    # obj_detected_img = draw_bboxes(image_raw, boxes, scores, classes, ALL_CATEGORIES)
+    # output_image_path = 'dog_bboxes.png'
+    # obj_detected_img.save(output_image_path, 'PNG')
 
-    print('Saved image with bounding boxes of detected objects to {}.'.format(output_image_path))
+    # print('Saved image with bounding boxes of detected objects to {}.'.format(output_image_path))
 
 if __name__ == '__main__':
     import argparse
@@ -269,6 +232,3 @@ if __name__ == '__main__':
     FLAGS = parser.parse_args()
 
     main(FLAGS)
-
-
-# python onnx_to_tensorrt.py --build -p fp16 --vram 4 --max_batch_size 1

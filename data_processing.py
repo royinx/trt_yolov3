@@ -1,7 +1,7 @@
 import math
 from PIL import Image
 import numpy as np
-
+from scipy.special import expit
 
 # YOLOv3-608 has been trained with these 80 categories from COCO:
 # Lin, Tsung-Yi, et al. "Microsoft COCO: Common Objects in Context."
@@ -122,7 +122,7 @@ class PostprocessYOLO(object):
         outputs_reshaped = list()
         outputs = [output.reshape(1,*output.shape) for output in outputs]
         for output in outputs:
-            print(output.shape)
+            # print(output.shape)
             outputs_reshaped.append(self._reshape_output(output))
 
         boxes, categories, confidences = self._process_yolo_output(
@@ -137,7 +137,6 @@ class PostprocessYOLO(object):
         Keyword argument:
         output -- an output from a TensorRT engine after inference
         """
-        print(output.shape)
         output = np.transpose(output, [0, 2, 3, 1])
         _, height, width, _ = output.shape
         dim1, dim2 = height, width
@@ -211,32 +210,43 @@ class PostprocessYOLO(object):
         mask -- 2-dimensional tuple with mask specification for this output
         """
 
-        # Two in-line functions required for calculating the bounding box
-        # descriptors:
-        def sigmoid(value):
-            """Return the sigmoid of the input."""
-            return 1.0 / (1.0 + math.exp(-value))
-
-        def exponential(value):
-            """Return the exponential of the input."""
-            return math.exp(value)
-
-        # Vectorized calculation of above two functions:
-        sigmoid_v = np.vectorize(sigmoid)
-        exponential_v = np.vectorize(exponential)
-
         grid_h, grid_w, _, _ = output_reshaped.shape
 
         anchors = [self.anchors[i] for i in mask]
 
         # Reshape to N, height, width, num_anchors, box_params:
-        anchors_tensor = np.reshape(anchors, [1, 1, len(anchors), 2])
-        box_xy = sigmoid_v(output_reshaped[..., :2])
-        box_wh = exponential_v(output_reshaped[..., 2:4]) * anchors_tensor
-        box_confidence = sigmoid_v(output_reshaped[..., 4])
+        bl = True
+        if bl:
+            anchors_tensor = np.reshape(anchors, [1, 1, len(anchors), 2])
+            # output_reshaped = np.ascontiguousarray(output_reshaped)
+            box_xy = expit(output_reshaped[..., :2])
+            
+            box_wh = np.exp(output_reshaped[..., 2:4]) * anchors_tensor
+            box_confidence = expit(output_reshaped[..., 4])
 
-        box_confidence = np.expand_dims(box_confidence, axis=-1)
-        box_class_probs = sigmoid_v(output_reshaped[..., 5:])
+            box_confidence = np.expand_dims(box_confidence, axis=-1)
+            box_class_probs = expit(output_reshaped[..., 5:6])
+        else:
+            anchors_tensor = np.reshape(anchors, [1, 1, len(anchors), 2])
+            # output_reshaped = np.ascontiguousarray(output_reshaped)
+            box_xy = sigmoid.sigmoid_cython(output_reshaped[..., :2],output_reshaped[..., :2].shape)
+            
+            box_wh = sigmoid.exponential_cython(output_reshaped[..., 2:4],output_reshaped[..., 2:4].shape) * anchors_tensor
+            box_confidence = sigmoid.sigmoid_cython(output_reshaped[..., 4],output_reshaped[..., 4].shape)
+
+            box_confidence = np.expand_dims(box_confidence, axis=-1)
+            box_class_probs = sigmoid.sigmoid_cython(output_reshaped[..., 5:],output_reshaped[..., 5:].shape)
+
+        # anchors_tensor = np.reshape(anchors, [1, 1, len(anchors), 2])
+        # # output_reshaped = np.ascontiguousarray(output_reshaped)
+        # box_xy = sigmoid.sigmoid_cython(output_reshaped[..., :2],output_reshaped[..., :2].shape)
+        
+        # box_wh = sigmoid.exponential_cython(output_reshaped[..., 2:4],output_reshaped[..., 2:4].shape) * anchors_tensor
+        # box_confidence = sigmoid.sigmoid_cython(output_reshaped[..., 4],output_reshaped[..., 4].shape)
+
+        # box_confidence = np.expand_dims(box_confidence, axis=-1)
+        # box_class_probs = sigmoid.sigmoid_cython(output_reshaped[..., 5:],output_reshaped[..., 5:].shape)
+
 
         col = np.tile(np.arange(0, grid_w), grid_w).reshape(-1, grid_w)
         row = np.tile(np.arange(0, grid_h).reshape(-1, 1), grid_h)
@@ -245,17 +255,47 @@ class PostprocessYOLO(object):
         row = row.reshape(grid_h, grid_w, 1, 1).repeat(3, axis=-2)
         grid = np.concatenate((col, row), axis=-1)
 
-        box_xy += grid
-        box_xy /= (grid_w, grid_h)
-        box_wh /= self.input_resolution_yolo
-        box_xy -= (box_wh / 2.)
+
+
+        # box_xy += grid
+        np.add(box_xy,grid,out=box_xy)
+        # box_xy /= (grid_w, grid_h)
+        np.divide(box_xy,(grid_w, grid_h),out=box_xy)
+        # box_wh /= self.input_resolution_yolo
+        np.divide(box_wh,self.input_resolution_yolo, out = box_wh)
+        # box_xy -= (box_wh / 2.)
+        np.subtract(box_xy,(box_wh / 2.), out = box_xy)
         boxes = np.concatenate((box_xy, box_wh), axis=-1)
+
+
 
         # boxes: centroids, box_confidence: confidence level, box_class_probs:
         # class confidence
         return boxes, box_confidence, box_class_probs
 
     def _filter_boxes(self, boxes, box_confidences, box_class_probs):
+        """Take in the unfiltered bounding box descriptors and discard each cell
+        whose score is lower than the object threshold set during class initialization.
+
+        Keyword arguments:
+        boxes -- bounding box coordinates with shape (height,width,3,4); 4 for
+        x,y,height,width coordinates of the boxes
+        box_confidences -- bounding box confidences with shape (height,width,3,1); 1 for as
+        confidence scalar per element
+        box_class_probs -- class probabilities with shape (height,width,3,CATEGORY_NUM)
+
+        """
+        box_scores = box_confidences * box_class_probs
+        box_classes = np.argmax(box_scores, axis=-1)
+        box_class_scores = np.max(box_scores, axis=-1)
+        pos = np.where(box_class_scores >= self.object_threshold)
+
+        boxes = boxes[pos]
+        classes = box_classes[pos]
+        scores = box_class_scores[pos]
+        return boxes, classes, scores
+
+    def _filter_boxes_ori(self, boxes, box_confidences, box_class_probs):
         """Take in the unfiltered bounding box descriptors and discard each cell
         whose score is lower than the object threshold set during class initialization.
 

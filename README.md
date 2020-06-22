@@ -2,11 +2,18 @@ pull container 19.02 / 19.06   py2
  
 ``` shell
 docker pull nvcr.io/nvidia/tensorrt:19.02-py2
-docker pull nvcr.io/nvidia/tensorrt:19.06-py2
+docker pull nvcr.io/nvidia/tensorrt:19.12-py3
+```
+
+## Run conatainer in pack
+```shell
+docker build -t trt_yolov3 .
+docker run --rm -it --privileged --runtime=nvidia trt_yolov3 bash
+python3 onnx_to_tensorrt.py --build --vram 8 --max_batch_size 64 -p fp16
 ```
 
 
-## Run container 
+## Run container from scratch
 
 --privileged --runtime=nvidia 
 
@@ -18,10 +25,10 @@ cd tensorrt/samples/python/yolov3_onnx/ && python yolov3_to_onnx.py
 cp yolov3.onnx /sharefolder/
 ```
 
-(19.06 for onnx2trt , TRT 5.1.5 , onnx 1.5.0)
+(19.12 for onnx2trt , TRT 6.0.1.8 , onnx 1.7.0)
 ```shell
-docker run --rm -it --privileged --runtime=nvidia -v ~/Desktop/python:/sharefolder nvcr.io/nvidia/tensorrt:19.06-py2 bash
-pip install wget onnx
+docker run --rm -it --privileged --runtime=nvidia -v ~/Desktop/python:/sharefolder nvcr.io/nvidia/tensorrt:19.12-py3 bash
+pip3 install wget onnx scipy line_profiler
 git clone https://github.com/royinx/trt_yolov3.git
 cp /sharefolder/yolov3.onnx trt_yolov3/ && cd trt_yolov3
 python onnx_to_tensorrt.py --build --vram 8 --max_batch_size 64 -p fp16
