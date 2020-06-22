@@ -1,11 +1,11 @@
-pull container 19.02 / 19.06   py2 
+pull container 19.02 py2 / 19.12 py3
  
 ``` shell
 docker pull nvcr.io/nvidia/tensorrt:19.02-py2
 docker pull nvcr.io/nvidia/tensorrt:19.12-py3
 ```
 
-## Run conatainer in pack
+## Run conatainer from 1-Step mini build
 ```shell
 docker build -t trt_yolov3 .
 docker run --rm -it --privileged --runtime=nvidia trt_yolov3 bash
