@@ -2,6 +2,7 @@ import math
 from PIL import Image
 import numpy as np
 from scipy.special import expit
+import cv2
 
 # YOLOv3-608 has been trained with these 80 categories from COCO:
 # Lin, Tsung-Yi, et al. "Microsoft COCO: Common Objects in Context."
@@ -33,19 +34,14 @@ class PreprocessYOLO(object):
         """
         self.yolo_input_resolution = yolo_input_resolution
 
-    def process(self, input_image_path):
-        """Load an image from the specified input path,
-        and return it together with a pre-processed version required for feeding it into a
-        YOLOv3 network.
+    def process(self, input_array:np.ndarray) -> np.ndarray: # <NHWC>
+        #input img = 4d NHWC
+        print(input_array.shape)
+        image_array = self._resize(input_array)
+        image_array = self._shuffle_and_normalize(image_array)
+        return image_array
 
-        Keyword arguments:
-        input_image_path -- string path of the image to be loaded
-        """
-        image_raw, image_resized = self._load_and_resize(input_image_path)
-        image_preprocessed = self._shuffle_and_normalize(image_resized)
-        return image_raw, image_preprocessed
-
-    def _load_and_resize(self, input_image_path):
+    def _resize(self, input_array:np.ndarray) -> np.ndarray: # <NHWC>
         """Load an image from the specified path and resize it to the input resolution.
         Return the input image before resizing as a PIL Image (required for visualization),
         and the resized image as a NumPy float array.
@@ -53,19 +49,14 @@ class PreprocessYOLO(object):
         Keyword arguments:
         input_image_path -- string path of the image to be loaded
         """
+        output_array = np.empty((input_array.shape[0],*self.yolo_input_resolution,3), dtype=np.float32)
+        for n, image in enumerate(input_array):
+            output_array[n] = cv2.resize(image, self.yolo_input_resolution, interpolation=cv2.INTER_LINEAR)
+        output_array = np.ascontiguousarray(output_array)
 
-        image_raw = Image.open(input_image_path)
-        # Expecting yolo_input_resolution in (height, width) format, adjusting to PIL
-        # convention (width, height) in PIL:
-        new_resolution = (
-            self.yolo_input_resolution[1],
-            self.yolo_input_resolution[0])
-        image_resized = image_raw.resize(
-            new_resolution, resample=Image.BICUBIC)
-        image_resized = np.array(image_resized, dtype=np.float32, order='C')
-        return image_raw, image_resized
+        return output_array #<NHWC>
 
-    def _shuffle_and_normalize(self, image):
+    def _shuffle_and_normalize(self, input_array:np.ndarray):
         """Normalize a NumPy array representing an image to the range [0, 1], and
         convert it from HWC format ("channels last") to NCHW format ("channels first"
         with leading batch dimension).
@@ -73,14 +64,12 @@ class PreprocessYOLO(object):
         Keyword arguments:
         image -- image as three-dimensional NumPy float array, in HWC format
         """
-        image /= 255.0
-        # HWC to CHW format:
-        image = np.transpose(image, [2, 0, 1])
-        # CHW to NCHW format
-        image = np.expand_dims(image, axis=0)
+        np.divide(input_array,255.0, out = input_array)
+        # NHWC to NCHW format:
+        input_array = np.transpose(input_array, [0, 3, 1, 2])
         # Convert the image to row-major order, also known as "C order":
-        image = np.array(image, dtype=np.float32, order='C')
-        return image
+        input_array = np.ascontiguousarray(input_array)
+        return input_array
 
 
 class PostprocessYOLO(object):
@@ -172,7 +161,8 @@ class PostprocessYOLO(object):
         confidences = np.concatenate(confidences)
 
         # Scale boxes back to original image shape:
-        width, height = resolution_raw
+        _, height, width, _ = resolution_raw
+        # width, height = resolution_raw
         image_dims = [width, height, width, height]
         boxes = boxes * image_dims
 

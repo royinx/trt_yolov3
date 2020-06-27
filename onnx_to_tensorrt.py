@@ -6,7 +6,7 @@ import pycuda.driver as cuda
 import pycuda.autoinit
 from PIL import ImageDraw
 
-from yolov3_to_onnx import download_file
+# from yolov3_to_onnx import download_file
 from data_processing import PreprocessYOLO, PostprocessYOLO, ALL_CATEGORIES
 
 import sys, os
@@ -14,12 +14,7 @@ import sys, os
 # sys.path.insert(1, os.path.join(sys.path[0], ".."))
 from common import *
 
-import time
 
-from line_profiler import LineProfiler
-
-# profile = LineProfiler()
-# @profile
 def allocate_buffers(engine):
 
     inputs = []
@@ -30,7 +25,6 @@ def allocate_buffers(engine):
     for binding in engine:
 
         size = trt.volume(engine.get_binding_shape(binding)) * engine.max_batch_size
-        engine.max_batch_size
         dtype = trt.nptype(engine.get_binding_dtype(binding))
         host_mem = cuda.pagelocked_empty(size, dtype)
         device_mem = cuda.mem_alloc(host_mem.nbytes)
@@ -154,7 +148,7 @@ def main(FLAGS):
     """Create a TensorRT engine for ONNX-based YOLOv3-608 and run inference."""
     onnx_file_path = 'yolov3.onnx'
     engine_file_path = "yolov3.trt"
-    input_image_path = 'debug_image/test0.jpg'
+    input_image_path = 'debug_image/test1.jpg'
     input_resolution_yolov3_HW = (608, 608)
     preprocessor = PreprocessYOLO(input_resolution_yolov3_HW)
     image_raw, image = preprocessor.process(input_image_path)
@@ -162,23 +156,6 @@ def main(FLAGS):
     shape_orig_WH = image_raw.size
     
     trt_outputs = []
-
-
-    '''
-    with get_engine(onnx_file_path, FLAGS, engine_file_path) as engine, \
-         engine.create_execution_context() as context:
-
-        inputs, outputs, bindings, stream = allocate_buffers(engine)
-        
-        print('Running inference on image {}...'.format(input_image_path))
- 
-        inputs[0].host = image
-        start_time = time.time()
-        
-        trt_outputs = do_inference(context, bindings=bindings, inputs=inputs, outputs=outputs, stream=stream)
-
-    print(time.time()-start_time)
-    '''
 
     with get_engine(onnx_file_path, FLAGS, engine_file_path) as engine, \
         engine.create_execution_context() as context:
