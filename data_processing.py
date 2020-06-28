@@ -162,7 +162,6 @@ class PostprocessYOLO(object):
 
         # Scale boxes back to original image shape:
         _, height, width, _ = resolution_raw
-        # width, height = resolution_raw
         image_dims = [width, height, width, height]
         boxes = boxes * image_dims
 
@@ -205,38 +204,16 @@ class PostprocessYOLO(object):
         anchors = [self.anchors[i] for i in mask]
 
         # Reshape to N, height, width, num_anchors, box_params:
-        bl = True
-        if bl:
-            anchors_tensor = np.reshape(anchors, [1, 1, len(anchors), 2])
-            # output_reshaped = np.ascontiguousarray(output_reshaped)
-            box_xy = expit(output_reshaped[..., :2])
-            
-            box_wh = np.exp(output_reshaped[..., 2:4]) * anchors_tensor
-            box_confidence = expit(output_reshaped[..., 4])
-
-            box_confidence = np.expand_dims(box_confidence, axis=-1)
-            box_class_probs = expit(output_reshaped[..., 5:6])
-        else:
-            anchors_tensor = np.reshape(anchors, [1, 1, len(anchors), 2])
-            # output_reshaped = np.ascontiguousarray(output_reshaped)
-            box_xy = sigmoid.sigmoid_cython(output_reshaped[..., :2],output_reshaped[..., :2].shape)
-            
-            box_wh = sigmoid.exponential_cython(output_reshaped[..., 2:4],output_reshaped[..., 2:4].shape) * anchors_tensor
-            box_confidence = sigmoid.sigmoid_cython(output_reshaped[..., 4],output_reshaped[..., 4].shape)
-
-            box_confidence = np.expand_dims(box_confidence, axis=-1)
-            box_class_probs = sigmoid.sigmoid_cython(output_reshaped[..., 5:],output_reshaped[..., 5:].shape)
-
-        # anchors_tensor = np.reshape(anchors, [1, 1, len(anchors), 2])
-        # # output_reshaped = np.ascontiguousarray(output_reshaped)
-        # box_xy = sigmoid.sigmoid_cython(output_reshaped[..., :2],output_reshaped[..., :2].shape)
+        anchors_tensor = np.reshape(anchors, [1, 1, len(anchors), 2])
+        # output_reshaped = np.ascontiguousarray(output_reshaped)
+        box_xy = expit(output_reshaped[..., :2])
         
-        # box_wh = sigmoid.exponential_cython(output_reshaped[..., 2:4],output_reshaped[..., 2:4].shape) * anchors_tensor
-        # box_confidence = sigmoid.sigmoid_cython(output_reshaped[..., 4],output_reshaped[..., 4].shape)
+        box_wh = np.exp(output_reshaped[..., 2:4]) * anchors_tensor
+        box_confidence = expit(output_reshaped[..., 4])
 
-        # box_confidence = np.expand_dims(box_confidence, axis=-1)
-        # box_class_probs = sigmoid.sigmoid_cython(output_reshaped[..., 5:],output_reshaped[..., 5:].shape)
-
+        box_confidence = np.expand_dims(box_confidence, axis=-1)
+        # box_class_probs = expit(output_reshaped[..., 5:6]) # for only people detection
+        box_class_probs = expit(output_reshaped[..., 5:])
 
         col = np.tile(np.arange(0, grid_w), grid_w).reshape(-1, grid_w)
         row = np.tile(np.arange(0, grid_h).reshape(-1, 1), grid_h)
@@ -244,8 +221,6 @@ class PostprocessYOLO(object):
         col = col.reshape(grid_h, grid_w, 1, 1).repeat(3, axis=-2)
         row = row.reshape(grid_h, grid_w, 1, 1).repeat(3, axis=-2)
         grid = np.concatenate((col, row), axis=-1)
-
-
 
         # box_xy += grid
         np.add(box_xy,grid,out=box_xy)
@@ -256,8 +231,6 @@ class PostprocessYOLO(object):
         # box_xy -= (box_wh / 2.)
         np.subtract(box_xy,(box_wh / 2.), out = box_xy)
         boxes = np.concatenate((box_xy, box_wh), axis=-1)
-
-
 
         # boxes: centroids, box_confidence: confidence level, box_class_probs:
         # class confidence

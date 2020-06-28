@@ -4,6 +4,7 @@ import numpy as np
 import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
+import asyncio
 
 from data_processing import PreprocessYOLO, PostprocessYOLO, ALL_CATEGORIES
 
@@ -12,6 +13,7 @@ import sys, os
 from common import *
 from turbojpeg import TurboJPEG
 from line_profiler import LineProfiler
+import time 
 
 jpeg = TurboJPEG()
 
@@ -138,7 +140,6 @@ def build_engine(FLAGS):
         builder.max_workspace_size = FLAGS.vram* 1 << 30 # 1GB
         builder.max_batch_size = FLAGS.max_batch_size
 
-
         if FLAGS.precision == 'fp16':
             # set to fp16 
             print('force to fp16')
@@ -168,6 +169,21 @@ def build_engine(FLAGS):
             print('Beginning ONNX file parsing')
             parser.parse(model.read())
         print('Completed parsing of ONNX file')
+
+        # setting output layer
+        # if FLAGS.onnx=="yolov3.onnx":
+        #     print(network.num_layers - 1)
+        #     output_1 = network.get_layer(82)
+        #     output_1 = network.get_layer(-1)
+        #     print(output_1)
+        #     # output_2 = network.get_layer(94)
+        #     # output_3 = network.get_layer(106)
+        #     # network.mark_output(output_1.get_output(0),output_2.get_output(0),output_3.get_output(0))
+        #     exit()
+        # else:
+        #     last_layer = network.get_layer(network.num_layers - 1)
+        #     network.mark_output(last_layer.get_output(0))
+
 
         print('Building an engine from file {}; this may take a while...'.format(onnx_file_path))
         engine = builder.build_cuda_engine(network)
@@ -199,8 +215,6 @@ if __name__ == '__main__':
     parser.add_argument('--onnx', type=str,
                         required=False, default='yolov3.onnx',
                         help='(Build mode) ONNX model location')
-
-
 
     FLAGS = parser.parse_args()
 
