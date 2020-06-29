@@ -36,7 +36,6 @@ class PreprocessYOLO(object):
 
     def process(self, input_array:np.ndarray) -> np.ndarray: # <NHWC>
         #input img = 4d NHWC
-        print(input_array.shape)
         image_array = self._resize(input_array)
         image_array = self._shuffle_and_normalize(image_array)
         return image_array
@@ -212,8 +211,8 @@ class PostprocessYOLO(object):
         box_confidence = expit(output_reshaped[..., 4])
 
         box_confidence = np.expand_dims(box_confidence, axis=-1)
-        # box_class_probs = expit(output_reshaped[..., 5:6]) # for only people detection
-        box_class_probs = expit(output_reshaped[..., 5:])
+        box_class_probs = expit(output_reshaped[..., 5:6]) # for only people detection
+        #box_class_probs = expit(output_reshaped[..., 5:])
 
         col = np.tile(np.arange(0, grid_w), grid_w).reshape(-1, grid_w)
         row = np.tile(np.arange(0, grid_h).reshape(-1, 1), grid_h)
