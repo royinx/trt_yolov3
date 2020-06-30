@@ -12,7 +12,7 @@ import sys, os
 
 from common import *
 from turbojpeg import TurboJPEG
-from line_profiler import LineProfiler
+
 import time 
 
 import threading 
@@ -25,7 +25,17 @@ rs_q = Queue()
 
 jpeg = TurboJPEG()
 
-profile = LineProfiler()
+# Memory Profiling
+from memory_profiler import profile
+
+# Single Thread Profiling
+# from line_profiler import LineProfiler
+# profile = LineProfiler()
+
+# Multiple Thread Profiling
+# import yappi
+
+
 
 MAX_BATCH_SIZE = int(os.environ.get('MAX_BATCH_SIZE'))
 
@@ -49,7 +59,9 @@ class GPU_thread(threading.Thread):
         self.cuda_ctx = cuda.Device(0).make_context()  # GPU 0
         self.engine = YoloGPU("yolov3.trt")
         print('TrtThread: start running...')
-
+        print('inf: init')
+        time.sleep(10)
+        print('inf: init Done')
         while self.running:
             if not inf_q.empty():
                 input_array, ori_shape = inf_q.get()
@@ -57,6 +69,7 @@ class GPU_thread(threading.Thread):
                 while 1:
                     if not post_q.full():
                         post_q.put((outputs, ori_shape))
+                        del outputs
                         break
                     time.sleep(0.1)
             else:
@@ -134,7 +147,7 @@ class YoloCPU(object):
                           "nms_threshold": 0.5,
                           "yolo_input_resolution": (608, 608)}
         self.postprocessor = PostprocessYOLO(**postprocessor_args)
-        self.running = None
+        self.running = True
         
     def stop(self):
         self.running = False
@@ -146,9 +159,11 @@ class YoloCPU(object):
         trt_outputs = [output.reshape(shape) for output, shape in zip(trt_outputs, output_shapes)]  # [(1, 255, 19, 19), (1, 255, 38, 38), (1, 255, 76, 76)]
         return trt_outputs # in: <NCHW> <N,3,608,608>, out: [(N, 255, 19, 19), (N, 255, 38, 38), (N, 255, 76, 76)]
 
-    # @profile
+    @profile
     def preprocess(self):
-        self.running = True
+        print('pre: init')
+        time.sleep(10)
+        print('pre: init Done')
         while self.running:
             if not pre_q.empty():
                 input_array = pre_q.get()
@@ -156,14 +171,18 @@ class YoloCPU(object):
                 while RUN:
                     if not inf_q.full():
                         inf_q.put((outputs, input_array.shape))
+                        del outputs
                         break
                     time.sleep(0.1)
             else:
                 time.sleep(0.05)
 
 
-    @profile
+    # @profile
     def postprocess(self): # img_array <N,H,W,C>
+        print('post: init')
+        time.sleep(10)
+        print('post: init Done')
         while self.running:
             if not post_q.empty():
                 input_array, ori_shape = post_q.get()
@@ -175,22 +194,18 @@ class YoloCPU(object):
                 while 1:
                     if not rs_q.full():
                         rs_q.put(outputs)
+                        del outputs
                         break
                     time.sleep(0.1)
             else:
                 time.sleep(0.05)
 
+@profile
 def unit_test():
-    input_image_path = 'debug_image/crowd.jpg'
-        
-    with open(input_image_path, 'rb') as infile:
-        image_raw = jpeg.decode(infile.read())
-        image_raw = image_raw[:, :, [2,1,0]]  
-    image_raw = np.tile(image_raw,[500,1,1,1])
-
     yolo_cpu = YoloCPU()
     batch_size = MAX_BATCH_SIZE
 
+    # yappi.start()
     
     pre_threads = threading.Thread(target = yolo_cpu.preprocess)
     inf_threads = GPU_thread()
@@ -199,10 +214,22 @@ def unit_test():
     inf_threads.start()
     post_threads.start()
 
+    print("wait for pushing image....")
+    time.sleep(7)
+    print("start pushing image....")
+
+    input_image_path = 'debug_image/crowd.jpg'
+    with open(input_image_path, 'rb') as infile:
+        image_raw = jpeg.decode(infile.read())
+        image_raw = image_raw[:, :, [2,1,0]]
+    image_raw = np.tile(image_raw,[500,1,1,1])
+
     for i in range(0, len(image_raw), batch_size):
         batch = image_raw[i:i+batch_size]
         pre_q.put(batch)
-    
+        del batch
+    del image_raw
+
     while 1:
         rs_size = rs_q.qsize()
         print(f'pre: {pre_q.qsize()}, inf: {inf_q.qsize()}, post: {post_q.qsize()}, rs: {rs_size}')
@@ -216,12 +243,19 @@ def unit_test():
             print("inf joined")
             post_threads.join()
             print("post joined")
+            time.sleep(3)
             # profile.print_stats()
-            return
+            # return
+            break
         else:
             time.sleep(1)
         
-    
+    # threads = yappi.get_thread_stats()
+    # for thread in threads:
+    #     print(
+    #         "Function stats for (%s) (%d)" % (thread.name, thread.id)
+    #     )  # it is the Thread.__class__.__name__
+    #     yappi.get_func_stats(ctx_id=thread.id).print_all()
 
 
 def build_engine(FLAGS):
