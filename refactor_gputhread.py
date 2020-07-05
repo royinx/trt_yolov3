@@ -25,8 +25,10 @@ rs_q = Queue()
 
 jpeg = TurboJPEG()
 
+from time import perf_counter
+
 # Memory Profiling
-from memory_profiler import profile
+# from memory_profiler import profile
 
 # Single Thread Profiling
 # from line_profiler import LineProfiler
@@ -38,9 +40,10 @@ from memory_profiler import profile
 
 
 MAX_BATCH_SIZE = int(os.environ.get('MAX_BATCH_SIZE'))
+NUM_OF_TRT_ENGINE = int(os.environ.get('NUM_OF_TRT_ENGINE',1))
 
-RUN = 1
-
+RUN = 0
+tic = None
 class GPU_thread(threading.Thread):
 # class TensorRT(RootClass):
     def __init__(self):
@@ -59,23 +62,21 @@ class GPU_thread(threading.Thread):
         self.cuda_ctx = cuda.Device(0).make_context()  # GPU 0
         self.engine = YoloGPU("yolov3.trt")
         print('TrtThread: start running...')
-        print('inf: init')
-        time.sleep(10)
-        print('inf: init Done')
         while self.running:
-            if not inf_q.empty():
-                input_array, ori_shape = inf_q.get()
-                outputs = self.engine.inference(input_array) # out: [(N, 255, 19, 19), (N, 255, 38, 38), (N, 255, 76, 76)]
-                while 1:
-                    if not post_q.full():
-                        post_q.put((outputs, ori_shape))
-                        del outputs
-                        break
-                    time.sleep(0.1)
-            else:
-                time.sleep(0.05)
-                
-                        
+            if RUN: # start inference concurrently
+                if not inf_q.empty():
+                    input_array, ori_shape = inf_q.get()
+                    outputs = self.engine.inference(input_array) # out: [(N, 255, 19, 19), (N, 255, 38, 38), (N, 255, 76, 76)]
+                    while 1:
+                        if not post_q.full():
+                            post_q.put((outputs, ori_shape))
+                            del outputs
+                            break
+                        time.sleep(0.1)
+                else:
+                    time.sleep(0.05)
+                    
+                    
         del self.engine
         self.cuda_ctx.pop()
         del self.cuda_ctx
@@ -99,8 +100,7 @@ class YoloGPU(object):
                 trt.Runtime(self.TRT_LOGGER) as runtime:
                 return runtime.deserialize_cuda_engine(f.read())
         else:
-            print("Cannot find .trt engine file.")
-            exit(0)
+            raise("Cannot find .trt engine file.")
 
     def allocate_buffers(self):
         self.inputs = []
@@ -159,16 +159,12 @@ class YoloCPU(object):
         trt_outputs = [output.reshape(shape) for output, shape in zip(trt_outputs, output_shapes)]  # [(1, 255, 19, 19), (1, 255, 38, 38), (1, 255, 76, 76)]
         return trt_outputs # in: <NCHW> <N,3,608,608>, out: [(N, 255, 19, 19), (N, 255, 38, 38), (N, 255, 76, 76)]
 
-    @profile
     def preprocess(self):
-        print('pre: init')
-        time.sleep(10)
-        print('pre: init Done')
         while self.running:
             if not pre_q.empty():
                 input_array = pre_q.get()
                 outputs = self.preprocessor.process(input_array) # in: <NHWC> raw image batch , out: <NCHW> resized <N,3,608,608>
-                while RUN:
+                while 1:
                     if not inf_q.full():
                         inf_q.put((outputs, input_array.shape))
                         del outputs
@@ -180,9 +176,6 @@ class YoloCPU(object):
 
     # @profile
     def postprocess(self): # img_array <N,H,W,C>
-        print('post: init')
-        time.sleep(10)
-        print('post: init Done')
         while self.running:
             if not post_q.empty():
                 input_array, ori_shape = post_q.get()
@@ -200,28 +193,29 @@ class YoloCPU(object):
             else:
                 time.sleep(0.05)
 
-@profile
 def unit_test():
     yolo_cpu = YoloCPU()
     batch_size = MAX_BATCH_SIZE
 
-    # yappi.start()
     
     pre_threads = threading.Thread(target = yolo_cpu.preprocess)
-    inf_threads = GPU_thread()
+    inf_threads = []
+    for _ in range(NUM_OF_TRT_ENGINE):
+        inf_threads.append(GPU_thread())
     post_threads = threading.Thread(target = yolo_cpu.postprocess)
     pre_threads.start()
-    inf_threads.start()
+    for gpu_thread in inf_threads:
+        gpu_thread.start()
     post_threads.start()
 
     print("wait for pushing image....")
-    time.sleep(7)
+    time.sleep(3)
     print("start pushing image....")
 
-    input_image_path = 'debug_image/crowd.jpg'
+    input_image_path = 'debug_image/test2.jpg'
     with open(input_image_path, 'rb') as infile:
-        image_raw = jpeg.decode(infile.read())
-        image_raw = image_raw[:, :, [2,1,0]]
+        image_raw_ = jpeg.decode(infile.read())
+        image_raw = image_raw_[:, :, [2,1,0]]
     image_raw = np.tile(image_raw,[500,1,1,1])
 
     for i in range(0, len(image_raw), batch_size):
@@ -230,33 +224,67 @@ def unit_test():
         del batch
     del image_raw
 
+    # GPU worker delay timer
+    def start_timer():
+        time.sleep(0)
+        print("""================== start infffffff ==================""")
+        global RUN,tic
+        tic = perf_counter()
+        RUN = 1
+        return 
+    timer = threading.Thread(target = start_timer)
+    timer.start()
+    
     while 1:
         rs_size = rs_q.qsize()
         print(f'pre: {pre_q.qsize()}, inf: {inf_q.qsize()}, post: {post_q.qsize()}, rs: {rs_size}')
         for _ in range(rs_size):
-            rs_q.get()
+            out = rs_q.get()
         if pre_q.qsize() == inf_q.qsize() == post_q.qsize() == 0:
             yolo_cpu.running = False
             pre_threads.join()
             print("pre joined")
-            inf_threads.stop()
-            print("inf joined")
+            for idx, gpu_thread in enumerate(inf_threads):
+                gpu_thread.stop()
+                print(f"Inf:{idx} joined")
             post_threads.join()
             print("post joined")
-            time.sleep(3)
+            timer.join()
             # profile.print_stats()
             # return
             break
         else:
-            time.sleep(1)
-        
-    # threads = yappi.get_thread_stats()
-    # for thread in threads:
-    #     print(
-    #         "Function stats for (%s) (%d)" % (thread.name, thread.id)
-    #     )  # it is the Thread.__class__.__name__
-    #     yappi.get_func_stats(ctx_id=thread.id).print_all()
+            time.sleep(0.05)
+    print(f'total: 500, shape: {image_raw_.shape}, batch: {MAX_BATCH_SIZE}, {perf_counter()-tic}')
 
+    # reformating bbox
+    # bboxes, _, _ = out[0][0]
+    # image_out = image_raw_
+    # image_raw_height, image_raw_width, _ = image_raw_.shape
+    # for bbox in bboxes:
+    #     # handle the  of padding space
+    #     x_coord, y_coord, width, height = bbox
+    #     x1 = max(0, np.floor(x_coord + 0.5).astype(int))
+    #     y1 = max(0, np.floor(y_coord + 0.5).astype(int))
+    #     x2 = min(image_raw_width, np.floor(x_coord + width + 0.5).astype(int))
+    #     y2 = min(image_raw_height, np.floor(y_coord + height + 0.5).astype(int))
+
+    #     # handle the edge case of padding space
+    #     x1 = min(image_raw_width, x1)
+    #     x2 = min(image_raw_width, x2)
+    #     if x1 == x2:
+    #         continue
+    #     y1 = min(image_raw_height, y1)
+    #     y2 = min(image_raw_height, y2)
+    #     if y1 == y2:
+    #         continue
+    #     if abs(x2-x1)<=10 | abs(y2-y1)<=10:
+    #         continue
+        
+    #     start_point = (x1,y1)
+    #     end_point = (x2,y2)
+    #     image_out = cv2.rectangle(image_out, start_point, end_point, (255,0,0), 2)
+    # cv2.imwrite("out2.jpg",image_out)
 
 def build_engine(FLAGS):
     """Takes an ONNX file and creates a TensorRT engine to run inference with"""
@@ -357,3 +385,4 @@ if __name__ == '__main__':
     # Build engine
     # docker run -it --rm --runtime=nvidia -v ${PWD}:/workshop -w /workshop   yolotrt python3 refactor.py --build --vram 6 --max_batch_size 64
  
+    # export NUM_OF_TRT_ENGINE=2 MAX_BATCH_SIZE=36 && clear && clear && python refactor_gputhread.py
