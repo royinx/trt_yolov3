@@ -211,7 +211,7 @@ def unit_test():
     # time.sleep(3)
     print("start pushing image....")
 
-    input_image_path = 'debug_image/test8.jpg'
+    input_image_path = 'debug_image/test1.jpg'
     with open(input_image_path, 'rb') as infile:
         image_raw_ = jpeg.decode(infile.read())
         image_raw = image_raw_[:, :, [2,1,0]]
@@ -263,12 +263,13 @@ def unit_test():
     
     preds = out[0]
     image_out = image_raw_
-    if preds is not None:
-        for pred in preds:
+    for pred in preds:
+        if pred is not None:
             image_out = cv2.rectangle(image_out, tuple(pred[0:2].astype(int)), tuple(pred[2:4].astype(int)), (255,0,0), 2)
-        cv2.imwrite("out2.jpg",image_out)
-    else:
-        print("No pedestrian detected")
+        else:
+            print("No pedestrian detected")
+
+    cv2.imwrite("out2.jpg",image_out)
 
 def build_engine(FLAGS):
     """Takes an ONNX file and creates a TensorRT engine to run inference with"""

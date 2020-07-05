@@ -316,26 +316,29 @@ class PostprocessYOLO(object):
         """
         _, image_raw_height, image_raw_width, _ = shape
         out = []
-        bboxes, class_, class_score  = preds[:,0:4],preds[:,4],preds[:,5]
-        for idx, bbox in enumerate(bboxes):
-            # handle the  of padding space
-            x_coord, y_coord, width, height = bbox
-            x1 = max(0, np.floor(x_coord + 0.5).astype(int))
-            y1 = max(0, np.floor(y_coord + 0.5).astype(int))
-            x2 = min(image_raw_width, np.floor(x_coord + width + 0.5).astype(int))
-            y2 = min(image_raw_height, np.floor(y_coord + height + 0.5).astype(int))
+        if preds is not None:
+            bboxes, class_, class_score  = preds[:,0:4],preds[:,4],preds[:,5]
+            for idx, bbox in enumerate(bboxes):
+                # handle the  of padding space
+                x_coord, y_coord, width, height = bbox
+                x1 = max(0, np.floor(x_coord + 0.5).astype(int))
+                y1 = max(0, np.floor(y_coord + 0.5).astype(int))
+                x2 = min(image_raw_width, np.floor(x_coord + width + 0.5).astype(int))
+                y2 = min(image_raw_height, np.floor(y_coord + height + 0.5).astype(int))
 
-            # handle the edge case of padding space
-            x1 = min(image_raw_width, x1)
-            x2 = min(image_raw_width, x2)
-            if x1 == x2:
-                continue
-            y1 = min(image_raw_height, y1)
-            y2 = min(image_raw_height, y2)
-            if y1 == y2:
-                continue
-            if abs(x2-x1)<=10 | abs(y2-y1)<=10:
-                continue
-            out.append([x1,y1,x2,y2,class_[idx],class_score[idx]])
-            
+                # handle the edge case of padding space
+                x1 = min(image_raw_width, x1)
+                x2 = min(image_raw_width, x2)
+                if x1 == x2:
+                    continue
+                y1 = min(image_raw_height, y1)
+                y2 = min(image_raw_height, y2)
+                if y1 == y2:
+                    continue
+                if abs(x2-x1)<=10 | abs(y2-y1)<=10:
+                    continue
+                out.append([x1,y1,x2,y2,class_[idx],class_score[idx]])
+        else:
+            out.append(None)
+
         return np.array(out)
