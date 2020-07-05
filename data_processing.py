@@ -105,7 +105,7 @@ class PostprocessYOLO(object):
 
         Keyword arguments:
         outputs -- outputs from a TensorRT engine in NCHW format
-        resolution_raw -- the original spatial resolution from the input PIL image in WH order
+        resolution_raw -- the original spatial resolution from the input image in NHWC order
         """
         outputs_reshaped = list()
         outputs = [output.reshape(1,*output.shape) for output in outputs]
@@ -113,10 +113,11 @@ class PostprocessYOLO(object):
             # print(output.shape)
             outputs_reshaped.append(self._reshape_output(output))
 
-        boxes, categories, confidences = self._process_yolo_output(
-            outputs_reshaped, resolution_raw)
+        preds = self._process_yolo_output(outputs_reshaped, resolution_raw)
+        preds = self.reformatting(preds,resolution_raw)
+        # 0-3: boxes, 4: categories, 5: confidences
 
-        return boxes, categories, confidences
+        return preds
 
     def _reshape_output(self, output):
         """Reshape a TensorRT output from NCHW to NHWC format (with expected C=255),
@@ -154,7 +155,7 @@ class PostprocessYOLO(object):
             boxes.append(box)
             categories.append(category)
             confidences.append(confidence)
-
+            
         boxes = np.concatenate(boxes)
         categories = np.concatenate(categories)
         confidences = np.concatenate(confidences)
@@ -180,13 +181,17 @@ class PostprocessYOLO(object):
             nscores.append(confidence[keep])
 
         if not nms_categories and not nscores:
-            return None, None, None
+            return None
+            # return None, None, None
 
-        boxes = np.concatenate(nms_boxes)
+        boxes = np.concatenate(nms_boxes).astype(int)
         categories = np.concatenate(nms_categories)
+        categories = np.expand_dims(categories,axis = -1)
         confidences = np.concatenate(nscores)
-
-        return boxes, categories, confidences
+        confidences = np.expand_dims(confidences,axis = -1)
+        
+        preds = np.concatenate((boxes,categories,confidences),axis=1)
+        return preds
 
     def _process_feats(self, output_reshaped, mask):
         """Take in a reshaped YOLO output in height,width,3,85 format together with its
@@ -231,33 +236,10 @@ class PostprocessYOLO(object):
         np.subtract(box_xy,(box_wh / 2.), out = box_xy)
         boxes = np.concatenate((box_xy, box_wh), axis=-1)
 
-        # boxes: centroids, box_confidence: confidence level, box_class_probs:
-        # class confidence
+        # boxes: centroids, box_confidence: object confidence level, box_class_probs: class confidence
         return boxes, box_confidence, box_class_probs
 
     def _filter_boxes(self, boxes, box_confidences, box_class_probs):
-        """Take in the unfiltered bounding box descriptors and discard each cell
-        whose score is lower than the object threshold set during class initialization.
-
-        Keyword arguments:
-        boxes -- bounding box coordinates with shape (height,width,3,4); 4 for
-        x,y,height,width coordinates of the boxes
-        box_confidences -- bounding box confidences with shape (height,width,3,1); 1 for as
-        confidence scalar per element
-        box_class_probs -- class probabilities with shape (height,width,3,CATEGORY_NUM)
-
-        """
-        box_scores = box_confidences * box_class_probs
-        box_classes = np.argmax(box_scores, axis=-1)
-        box_class_scores = np.max(box_scores, axis=-1)
-        pos = np.where(box_class_scores >= self.object_threshold)
-
-        boxes = boxes[pos]
-        classes = box_classes[pos]
-        scores = box_class_scores[pos]
-        return boxes, classes, scores
-
-    def _filter_boxes_ori(self, boxes, box_confidences, box_class_probs):
         """Take in the unfiltered bounding box descriptors and discard each cell
         whose score is lower than the object threshold set during class initialization.
 
@@ -324,3 +306,36 @@ class PostprocessYOLO(object):
 
         keep = np.array(keep)
         return keep
+
+    def reformatting(self, preds: np.ndarray, shape: tuple) -> np.ndarray: 
+        """
+        Box (x, y, width, height) to (x1, y1, x2, y2)
+        preds: [(x1,x2,y1,y2,class,cls_score), ...]
+        shape: ori image shape / (N,H,W,C)
+        out: array with x,y coordinate in axis=1  / (N_obj, 4) = [(x1,x2,y1,y2,class,cls_score), ...]
+        """
+        _, image_raw_height, image_raw_width, _ = shape
+        out = []
+        bboxes, class_, class_score  = preds[:,0:4],preds[:,4],preds[:,5]
+        for idx, bbox in enumerate(bboxes):
+            # handle the  of padding space
+            x_coord, y_coord, width, height = bbox
+            x1 = max(0, np.floor(x_coord + 0.5).astype(int))
+            y1 = max(0, np.floor(y_coord + 0.5).astype(int))
+            x2 = min(image_raw_width, np.floor(x_coord + width + 0.5).astype(int))
+            y2 = min(image_raw_height, np.floor(y_coord + height + 0.5).astype(int))
+
+            # handle the edge case of padding space
+            x1 = min(image_raw_width, x1)
+            x2 = min(image_raw_width, x2)
+            if x1 == x2:
+                continue
+            y1 = min(image_raw_height, y1)
+            y2 = min(image_raw_height, y2)
+            if y1 == y2:
+                continue
+            if abs(x2-x1)<=10 | abs(y2-y1)<=10:
+                continue
+            out.append([x1,y1,x2,y2,class_[idx],class_score[idx]])
+            
+        return np.array(out)

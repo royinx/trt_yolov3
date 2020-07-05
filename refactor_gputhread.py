@@ -19,14 +19,14 @@ import threading
 from queue import Queue
 
 pre_q = Queue()
-inf_q = Queue()
+inf_q = Queue(30) # avoid out of memory
 post_q = Queue()
 rs_q = Queue()
 
 jpeg = TurboJPEG()
 
 from time import perf_counter
-
+import cv2
 # Memory Profiling
 # from memory_profiler import profile
 
@@ -80,7 +80,6 @@ class GPU_thread(threading.Thread):
         del self.engine
         self.cuda_ctx.pop()
         del self.cuda_ctx
-        print('TrtThread: stopped...')
 
 class YoloGPU(object):
 # class TensorRT(RootClass):
@@ -181,7 +180,7 @@ class YoloCPU(object):
                 input_array, ori_shape = post_q.get()
                 input_array = self.reshape_CUDA_inf(input_array)
                 feat_batch = [[input_array[j][i] for j in range(len(input_array))] for i in range(len(input_array[0]))]
-                outputs = [[self.postprocessor.process(feat,ori_shape)]for feat in feat_batch] # out:[[bbox,score,categories,confidences],...]
+                outputs = [self.postprocessor.process(feat,ori_shape)for feat in feat_batch] # out:[[bbox,score,categories,confidences],...]
                 outputs = outputs[:ori_shape[0]]
 
                 while 1:
@@ -209,14 +208,15 @@ def unit_test():
     post_threads.start()
 
     print("wait for pushing image....")
-    time.sleep(3)
+    # time.sleep(3)
     print("start pushing image....")
 
-    input_image_path = 'debug_image/test2.jpg'
+    input_image_path = 'debug_image/test8.jpg'
     with open(input_image_path, 'rb') as infile:
         image_raw_ = jpeg.decode(infile.read())
         image_raw = image_raw_[:, :, [2,1,0]]
-    image_raw = np.tile(image_raw,[500,1,1,1])
+    load_batch_size = 500
+    image_raw = np.tile(image_raw,[load_batch_size,1,1,1])
 
     for i in range(0, len(image_raw), batch_size):
         batch = image_raw[i:i+batch_size]
@@ -224,6 +224,7 @@ def unit_test():
         del batch
     del image_raw
 
+    time.sleep(5)
     # GPU worker delay timer
     def start_timer():
         time.sleep(0)
@@ -246,7 +247,7 @@ def unit_test():
             print("pre joined")
             for idx, gpu_thread in enumerate(inf_threads):
                 gpu_thread.stop()
-                print(f"Inf:{idx} joined")
+                print(f"GPU_thread:{idx} joined")
             post_threads.join()
             print("post joined")
             timer.join()
@@ -255,36 +256,19 @@ def unit_test():
             break
         else:
             time.sleep(0.05)
-    print(f'total: 500, shape: {image_raw_.shape}, batch: {MAX_BATCH_SIZE}, {perf_counter()-tic}')
-
-    # reformating bbox
-    # bboxes, _, _ = out[0][0]
-    # image_out = image_raw_
-    # image_raw_height, image_raw_width, _ = image_raw_.shape
-    # for bbox in bboxes:
-    #     # handle the  of padding space
-    #     x_coord, y_coord, width, height = bbox
-    #     x1 = max(0, np.floor(x_coord + 0.5).astype(int))
-    #     y1 = max(0, np.floor(y_coord + 0.5).astype(int))
-    #     x2 = min(image_raw_width, np.floor(x_coord + width + 0.5).astype(int))
-    #     y2 = min(image_raw_height, np.floor(y_coord + height + 0.5).astype(int))
-
-    #     # handle the edge case of padding space
-    #     x1 = min(image_raw_width, x1)
-    #     x2 = min(image_raw_width, x2)
-    #     if x1 == x2:
-    #         continue
-    #     y1 = min(image_raw_height, y1)
-    #     y2 = min(image_raw_height, y2)
-    #     if y1 == y2:
-    #         continue
-    #     if abs(x2-x1)<=10 | abs(y2-y1)<=10:
-    #         continue
-        
-    #     start_point = (x1,y1)
-    #     end_point = (x2,y2)
-    #     image_out = cv2.rectangle(image_out, start_point, end_point, (255,0,0), 2)
-    # cv2.imwrite("out2.jpg",image_out)
+    total_time = perf_counter()-tic
+    throughput = load_batch_size/total_time
+    print(f'total: {load_batch_size}, shape: {image_raw_.shape}, batch: {MAX_BATCH_SIZE}, time: {round(total_time,4)}, throuhput: {throughput}')
+    # # reformatting result
+    
+    preds = out[0]
+    image_out = image_raw_
+    if preds is not None:
+        for pred in preds:
+            image_out = cv2.rectangle(image_out, tuple(pred[0:2].astype(int)), tuple(pred[2:4].astype(int)), (255,0,0), 2)
+        cv2.imwrite("out2.jpg",image_out)
+    else:
+        print("No pedestrian detected")
 
 def build_engine(FLAGS):
     """Takes an ONNX file and creates a TensorRT engine to run inference with"""
