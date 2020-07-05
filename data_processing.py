@@ -339,6 +339,6 @@ class PostprocessYOLO(object):
                     continue
                 out.append([x1,y1,x2,y2,class_[idx],class_score[idx]])
         else:
-            out.append(None)
+            return(None)
 
         return np.array(out)

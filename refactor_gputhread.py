@@ -46,8 +46,8 @@ RUN = 0
 tic = None
 class GPU_thread(threading.Thread):
 # class TensorRT(RootClass):
-    def __init__(self):
-        super().__init__()
+    def __init__(self,daemon=None):
+        super().__init__(daemon=daemon)
         self.cuda_ctx = None  # to be created when run
         self.engine = None   # to be created when run
         self.running = None
@@ -196,22 +196,22 @@ def unit_test():
     yolo_cpu = YoloCPU()
     batch_size = MAX_BATCH_SIZE
 
-    
-    pre_threads = threading.Thread(target = yolo_cpu.preprocess)
-    inf_threads = []
+    threads = {"cpu_threads":[], "gpu_threads":[]}
+    threads["cpu_threads"].append(threading.Thread(target = yolo_cpu.preprocess, daemon = True) )
+    threads["cpu_threads"].append(threading.Thread(target = yolo_cpu.postprocess, daemon = True) )
     for _ in range(NUM_OF_TRT_ENGINE):
-        inf_threads.append(GPU_thread())
-    post_threads = threading.Thread(target = yolo_cpu.postprocess)
-    pre_threads.start()
-    for gpu_thread in inf_threads:
-        gpu_thread.start()
-    post_threads.start()
+        threads["gpu_threads"].append(GPU_thread(daemon = True))
+
+    for instance in threads.values(): # go to type instance (CPU/GPU)
+        for instance_thread in instance: # go to instance thread (CPU thread / GPU thread)
+            instance_thread.start()
+
 
     print("wait for pushing image....")
     # time.sleep(3)
     print("start pushing image....")
 
-    input_image_path = 'debug_image/test1.jpg'
+    input_image_path = 'debug_image/test2.jpg'
     with open(input_image_path, 'rb') as infile:
         image_raw_ = jpeg.decode(infile.read())
         image_raw = image_raw_[:, :, [2,1,0]]
@@ -227,6 +227,7 @@ def unit_test():
     time.sleep(5)
     # GPU worker delay timer
     def start_timer():
+        # synchronise n-GPU threads to start service
         time.sleep(0)
         print("""================== start infffffff ==================""")
         global RUN,tic
@@ -242,14 +243,16 @@ def unit_test():
         for _ in range(rs_size):
             out = rs_q.get()
         if pre_q.qsize() == inf_q.qsize() == post_q.qsize() == 0:
+            
             yolo_cpu.running = False
-            pre_threads.join()
-            print("pre joined")
-            for idx, gpu_thread in enumerate(inf_threads):
+
+            for thread_ in threads["cpu_threads"]:
+                thread_.join()
+            print("cpu joined")
+            
+            for idx, gpu_thread in enumerate(threads["gpu_threads"]):
                 gpu_thread.stop()
                 print(f"GPU_thread:{idx} joined")
-            post_threads.join()
-            print("post joined")
             timer.join()
             # profile.print_stats()
             # return
@@ -261,15 +264,17 @@ def unit_test():
     print(f'total: {load_batch_size}, shape: {image_raw_.shape}, batch: {MAX_BATCH_SIZE}, time: {round(total_time,4)}, throuhput: {throughput}')
     # # reformatting result
     
+    print(out)
+    # for x in out:
+    #     print(x)
     preds = out[0]
     image_out = image_raw_
-    for pred in preds:
-        if pred is not None:
+    if preds is not None:
+        for pred in preds:
             image_out = cv2.rectangle(image_out, tuple(pred[0:2].astype(int)), tuple(pred[2:4].astype(int)), (255,0,0), 2)
-        else:
-            print("No pedestrian detected")
-
-    cv2.imwrite("out2.jpg",image_out)
+    else:
+        print("No pedestrian detected")
+    # cv2.imwrite("out2.jpg",image_out)
 
 def build_engine(FLAGS):
     """Takes an ONNX file and creates a TensorRT engine to run inference with"""
