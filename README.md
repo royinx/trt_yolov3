@@ -8,8 +8,8 @@ docker pull nvcr.io/nvidia/tensorrt:19.12-py3
 ## Run conatainer from 1-Step mini build
 ```shell
 docker build -t trt_yolov3 .
-docker run --rm -it --privileged --runtime=nvidia trt_yolov3 bash
-python3 onnx_to_tensorrt.py --build --vram 8 --max_batch_size 64 -p fp16
+docker run -it --rm --runtime=nvidia -v $PWD:/workshop -w /workshop trt_yolov3 python3 refactor.py --build --vram 6 --max_batch_size 64
+
 ```
 
 
@@ -31,7 +31,7 @@ docker run --rm -it --privileged --runtime=nvidia -v ~/Desktop/python:/sharefold
 pip3 install wget onnx scipy line_profiler
 git clone https://github.com/royinx/trt_yolov3.git
 cp /sharefolder/yolov3.onnx trt_yolov3/ && cd trt_yolov3
-python onnx_to_tensorrt.py --build --vram 8 --max_batch_size 64 -p fp16
+python3 refactor.py --build --vram 6 --max_batch_size 64
 ```
 
 -------------------------------------------------
