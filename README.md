@@ -1,21 +1,26 @@
-pull container 19.02 py2 / 19.12 py3
- 
+## Background image
 ``` shell
 docker pull nvcr.io/nvidia/tensorrt:19.02-py2
 docker pull nvcr.io/nvidia/tensorrt:19.12-py3
+```
+
+## Model Download
+[[Google Drive](https://drive.google.com/file/d/1r-T-x3-cmEZiPjfy4yW5lVUB5BWU4C5r/view?usp=sharing)]  /  [[Dropbox](https://www.dropbox.com/s/wg9w6s99z0abppx/yolov3.onnx?dl=0)]
+
+```bash
+wget https://www.dropbox.com/s/wg9w6s99z0abppx/yolov3.onnx?dl=1 -O yolov3.onnx
 ```
 
 ## Run conatainer from 1-Step mini build
 ```shell
 docker build -t trt_yolov3 .
 docker run -it --rm --runtime=nvidia -v $PWD:/workshop -w /workshop trt_yolov3 python3 refactor.py --build --vram 6 --max_batch_size 64
-
 ```
 
 
 ## Run container from scratch
 
---privileged --runtime=nvidia 
+> to use the flag to run nvidia docker *--privileged --runtime=nvidia* 
 
 (19.02 for yolo2onnx , TRT 5.0.2 ,  onnx 1.3.0 or 1.2.3 )
 ```shell
