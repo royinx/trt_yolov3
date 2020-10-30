@@ -18,12 +18,14 @@ import time
 import threading 
 from queue import Queue
 
-pre_q = Queue()
-inf_q = Queue(30) # avoid out of memory
-post_q = Queue()
+pre_q = Queue(50)
+inf_q = Queue(10) # avoid out of memory
+post_q = Queue(10)
 rs_q = Queue()
 
 jpeg = TurboJPEG()
+
+LOCK = threading.Lock()
 
 from time import perf_counter
 import cv2
@@ -31,16 +33,18 @@ import cv2
 # from memory_profiler import profile
 
 # Single Thread Profiling
-# from line_profiler import LineProfiler
-# profile = LineProfiler()
+from line_profiler import LineProfiler
+profile = LineProfiler()
 
 # Multiple Thread Profiling
 # import yappi
 
 
-
 MAX_BATCH_SIZE = int(os.environ.get('MAX_BATCH_SIZE'))
 NUM_OF_TRT_ENGINE = int(os.environ.get('NUM_OF_TRT_ENGINE',1))
+NUM_OF_PRE = int(os.environ.get('NUM_OF_PRE',1))
+NUM_OF_POST = int(os.environ.get('NUM_OF_POST',1))
+
 
 RUN = 0
 tic = None
@@ -51,6 +55,7 @@ class GPU_thread(threading.Thread):
         self.cuda_ctx = None  # to be created when run
         self.engine = None   # to be created when run
         self.running = None
+        self.batch_size = MAX_BATCH_SIZE
         
     def stop(self):
         self.running = False
@@ -60,7 +65,7 @@ class GPU_thread(threading.Thread):
     def run(self):
         self.running = True
         self.cuda_ctx = cuda.Device(0).make_context()  # GPU 0
-        self.engine = YoloGPU("yolov3.trt")
+        self.engine = YoloGPU(f"yolov3_batch_{self.batch_size}.trt")
         print('TrtThread: start running...')
         while self.running:
             if RUN: # start inference concurrently
@@ -123,10 +128,12 @@ class YoloGPU(object):
 
         # return inputs, outputs, bindings, stream
 
-
+    @profile
     def inference(self,inputs:np.ndarray) -> list: # input: <NCHW>
         self.inputs[0].host = inputs
+        LOCK.acquire()
         [cuda.memcpy_htod_async(inp.device, inp.host, self.stream) for inp in self.inputs]
+        LOCK.release()
         self.context.execute_async(batch_size=len(inputs), 
                                    bindings=self.bindings, 
                                    stream_handle=self.stream.handle)
@@ -196,26 +203,33 @@ def unit_test():
     yolo_cpu = YoloCPU()
     batch_size = MAX_BATCH_SIZE
 
-    
-    pre_threads = threading.Thread(target = yolo_cpu.preprocess)
+    pre_threads = []
+    for _ in range(NUM_OF_PRE):
+        pre_threads.append(threading.Thread(target = yolo_cpu.preprocess))
+    for pre_thread in pre_threads:
+        pre_thread.start()
+
     inf_threads = []
     for _ in range(NUM_OF_TRT_ENGINE):
         inf_threads.append(GPU_thread())
-    post_threads = threading.Thread(target = yolo_cpu.postprocess)
-    pre_threads.start()
     for gpu_thread in inf_threads:
         gpu_thread.start()
-    post_threads.start()
+
+    post_threads = []
+    for _ in range(NUM_OF_POST):
+        post_threads.append(threading.Thread(target = yolo_cpu.postprocess))
+    for post_thread in post_threads:
+        post_thread.start()
 
     print("wait for pushing image....")
     # time.sleep(3)
     print("start pushing image....")
 
-    input_image_path = 'debug_image/test1.jpg'
+    input_image_path = 'debug_image/crowd.jpg'
     with open(input_image_path, 'rb') as infile:
         image_raw_ = jpeg.decode(infile.read())
         image_raw = image_raw_[:, :, [2,1,0]]
-    load_batch_size = 500
+    load_batch_size = 1000
     image_raw = np.tile(image_raw,[load_batch_size,1,1,1])
 
     for i in range(0, len(image_raw), batch_size):
@@ -243,15 +257,18 @@ def unit_test():
             out = rs_q.get()
         if pre_q.qsize() == inf_q.qsize() == post_q.qsize() == 0:
             yolo_cpu.running = False
-            pre_threads.join()
-            print("pre joined")
+            for idx, pre_thread in enumerate(pre_threads):
+                pre_thread.join()
+                print(f"pre:{idx} joined")
             for idx, gpu_thread in enumerate(inf_threads):
                 gpu_thread.stop()
                 print(f"GPU_thread:{idx} joined")
-            post_threads.join()
-            print("post joined")
+            for idx, post_thread in enumerate(post_threads):
+                post_thread.join()
+                print(f"pre:{idx} joined")
+
             timer.join()
-            # profile.print_stats()
+            profile.print_stats()
             # return
             break
         else:
@@ -370,4 +387,4 @@ if __name__ == '__main__':
     # Build engine
     # docker run -it --rm --runtime=nvidia -v ${PWD}:/workshop -w /workshop   yolotrt python3 refactor.py --build --vram 6 --max_batch_size 64
  
-    # export NUM_OF_TRT_ENGINE=2 MAX_BATCH_SIZE=36 && clear && clear && python refactor_gputhread.py
+    # export NUM_OF_POST=1 NUM_OF_PRE=1 NUM_OF_TRT_ENGINE=2 MAX_BATCH_SIZE=40 && clear && clear && python refactor_gputhread.py
