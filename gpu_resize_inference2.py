@@ -151,8 +151,8 @@ TransNorKer = module.get_function("Transpose_and_normalise")
 postprocessor_args = {"yolo_masks": [(6, 7, 8), (3, 4, 5), (0, 1, 2)],                    
                     "yolo_anchors": [(10, 13), (16, 30), (33, 23), (30, 61), (62, 45), 
                                     (59, 119), (116, 90), (156, 198), (373, 326)],
-                    "obj_threshold": 0.6,
-                    "nms_threshold": 0.5,
+                    "obj_threshold": 0.5,
+                    "nms_threshold": 0.4,
                     "yolo_input_resolution": (608, 608)}
 postprocessor = PostprocessYOLO(**postprocessor_args)
 
@@ -176,8 +176,6 @@ max_batch_size = engine.max_batch_size
 bindings = []
 
 
-
-
 # run preprocess and inference
 @profile
 def gpu_resize(input_img: np.ndarray , stream: cuda.Stream):
@@ -199,7 +197,7 @@ def gpu_resize(input_img: np.ndarray , stream: cuda.Stream):
     batch, src_h, src_w, channel = input_img.shape
     dst_h, dst_w = 608, 608
     frame_h, frame_w = 1080*2, 1920*2
-    assert (src_h <= frame_h) & (src_w <= frame_w)
+    assert (src_h <= frame_h) or (src_w <= frame_w)
     # Mem Allocation
     # input memory
     
@@ -334,7 +332,9 @@ if __name__ == "__main__":
     batch = 40
     # img_batch_0 = np.tile(cv2.resize(cv2.imread("trump.jpg"),(64,48)),[batch,1,1,1])
     # img_batch_1 = np.tile(cv2.resize(cv2.imread("trump.jpg"),(320,240)),[batch,1,1,1])
-    img_batch_2 = np.tile(cv2.imread("debug_image/two_face.jpg"),[batch,1,1,1])
+    # img_batch_2 = np.tile(cv2.imread("debug_image/two_face.jpg"),[batch,1,1,1])
+    img_batch_2 = np.tile(cv2.imread("debug_image/crowd.jpg"),[batch,1,1,1])
+    # img_batch_2 = np.tile(cv2.resize(cv2.imread("debug_image/test7.jpg"),(1920*2,1080*2)),[batch,1,1,1])
     # pix_0 = gpu_resize(img_batch_0)
     # pix_1 = gpu_resize(img_batch_1)
     pix_2 = gpu_resize(img_batch_2,stream = stream)
