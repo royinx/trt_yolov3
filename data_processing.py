@@ -312,7 +312,7 @@ class PostprocessYOLO(object):
         Box (x, y, width, height) to (x1, y1, x2, y2)
         preds: [(x1,x2,y1,y2,class,cls_score), ...]
         shape: ori image shape / (N,H,W,C)
-        out: array with x,y coordinate in axis=1  / (N_obj, 4) = [(x1,x2,y1,y2,class,cls_score), ...]
+        out: array with x,y coordinate in axis=1  / (N_obj, 4) = [(x1,y1,x2,y2,class,cls_score), ...]
         """
         _, image_raw_height, image_raw_width, _ = shape
         out = []
