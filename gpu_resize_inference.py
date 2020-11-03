@@ -1,0 +1,268 @@
+from __future__ import print_function
+
+import numpy as np
+import tensorrt as trt
+import pycuda.driver as cuda
+import pycuda.autoinit
+# import asyncio
+
+from data_processing import PreprocessYOLO, PostprocessYOLO, ALL_CATEGORIES
+
+import sys, os
+
+from common import *
+from turbojpeg import TurboJPEG
+from line_profiler import LineProfiler
+import time 
+from cuda_module import YoloResizeKer, TransNorKer
+
+jpeg = TurboJPEG()
+
+profile = LineProfiler()
+
+frame_h, frame_w = 1080*2, 1920*2 # size of image placeholder ,  reserved for 4k image placeholder
+dst_h, dst_w = 608, 608 # resize image size to (608,608) = the size of yolo input 
+
+class TensorRT(object):
+# class TensorRT(RootClass):
+    def __init__(self,engine_file):
+        super().__init__()
+        self.TRT_LOGGER = trt.Logger()
+        # self.engine = self.get_engine(engine_file)
+        # self.context = self.engine.create_execution_context()
+        # self.max_batch_size = self.engine.max_batch_size
+        self.max_batch_size = 40
+        self.allocate_buffers()
+
+    def get_engine(self, engine_file_path):
+        if os.path.exists(engine_file_path):
+            print("Reading engine from file {}".format(engine_file_path))
+            with open(engine_file_path, "rb") as f, \
+                trt.Runtime(self.TRT_LOGGER) as runtime:
+                return runtime.deserialize_cuda_engine(f.read())
+        else:
+            print("Cannot find .trt engine file.")
+            exit(0)
+
+    def allocate_buffers(self, input_shape=(1080,1920,3)):
+        self.outputs = []
+        self.bindings = []
+        self.stream = cuda.Stream()
+
+        input_host_mem = cuda.pagelocked_zeros(shape=(self.max_batch_size,
+                                                      input_shape[0], # H
+                                                      input_shape[1], # W
+                                                      input_shape[2]), # C
+                                                dtype=np.uint8,
+                                                mem_flags=cuda.host_alloc_flags.DEVICEMAP)
+        input_device_mem = cuda.mem_alloc(input_host_mem.nbytes)
+        self.inputs = HostDeviceMem(input_host_mem, input_device_mem)
+
+        trans_bytes = np.zeros((self.max_batch_size,dst_h,dst_w,3),dtype=np.single).nbytes
+
+        self.trans = cuda.mem_alloc(trans_bytes)
+
+        # for binding in self.engine:
+        #     size = trt.volume(self.engine.get_binding_shape(binding)) * self.max_batch_size
+        #     dtype = trt.nptype(self.engine.get_binding_dtype(binding))
+        #     host_mem = cuda.pagelocked_empty(size, dtype)
+        #     device_mem = cuda.mem_alloc(host_mem.nbytes)
+
+        #     self.bindings.append(int(device_mem))
+        #     # print(bindings)
+        #     # Append to the appropriate list.
+        #     if self.engine.binding_is_input(binding):
+        #         self.yolo_inputs = device_mem
+        #     else:
+        #         self.outputs.append(HostDeviceMem(host_mem, device_mem))
+
+        # return inputs, outputs, bindings, stream
+    @profile
+    def inference(self,inputs:np.ndarray) -> list: # input: <NCHW>
+        # self.inputs[0].host = inputs
+        _ ,src_h ,src_w ,_ = inputs.shape
+        self.inputs.host[:,:src_h,:src_w,:] = inputs
+        cuda.memcpy_htod_async(self.inputs.device, self.inputs.host, self.stream)
+        # cuda.memcpy_htod_async(out["device"], out["host"],stream)
+        # cuda.memcpy_htod_async(out["device"], out["host"],stream)
+
+        # [cuda.memcpy_htod_async(inp.device, inp.host, self.stream) for inp in self.inputs]
+        
+        print(self.max_batch_size)
+        YoloResizeKer(self.inputs.device, self.trans, 
+                        np.int32(src_h), np.int32(src_w),
+                        np.int32(frame_h), np.int32(frame_w),
+                        np.float32(src_h/dst_h), np.float32(src_w/dst_w),
+                        block=(32, 32, 1),
+                        grid=(19,19,3*self.max_batch_size),
+                        stream=self.stream)
+        """
+        TransNorKer(self.yolo_inputs,self.trans,
+                    block=(32, 32, 1),
+                    grid=(19,19,3*self.max_batch_size))
+
+
+        self.context.execute_async(batch_size=self.max_batch_size, 
+                                   bindings=self.bindings, 
+                                   stream_handle=self.stream.handle)
+        [cuda.memcpy_dtoh_async(out.host, out.device, self.stream) for out in self.outputs]
+        """
+        self.stream.synchronize()
+        return [out.host for out in self.outputs]
+
+class YoloTRT(object):
+    def __init__(self):
+        super().__init__()
+        # resolution
+        # self.preprocessor = PreprocessYOLO((608, 608))
+        self.trt = TensorRT("yolov3.trt")
+        postprocessor_args = {"yolo_masks": [(6, 7, 8), (3, 4, 5), (0, 1, 2)],                    
+                          "yolo_anchors": [(10, 13), (16, 30), (33, 23), (30, 61), (62, 45), 
+                                           (59, 119), (116, 90), (156, 198), (373, 326)],
+                          "obj_threshold": 0.6,
+                          "nms_threshold": 0.5,
+                          "yolo_input_resolution": (608, 608)}
+        self.postprocessor = PostprocessYOLO(**postprocessor_args)
+        
+    def _preprocess(self, input_array:np.ndarray):
+
+        return
+
+    def _inference(self, input: np.ndarray) -> list: # 
+        trt_outputs = self.trt.inference(input)
+        output_shapes = [(self.trt.max_batch_size, 255, 19, 19), 
+                         (self.trt.max_batch_size, 255, 38, 38), 
+                         (self.trt.max_batch_size, 255, 76, 76)]
+                         
+        trt_outputs = [output.reshape(shape) for output, shape in zip(trt_outputs, output_shapes)]  # [(1, 255, 19, 19), (1, 255, 38, 38), (1, 255, 76, 76)]
+        return trt_outputs # in: <NCHW> <N,3,608,608>, out: [(N, 255, 19, 19), (N, 255, 38, 38), (N, 255, 76, 76)]
+
+    # def _postprocess(self, feat_batch, shape_orig_WH:tuple): 
+    #     return [[self.postprocessor.process(feat,shape_orig)]for feat, shape_orig in zip(feat_batch,shape_orig_WH)]
+
+    @profile
+    def inference(self, input_array:np.ndarray): # img_array <N,H,W,C>
+        # pre = self.preprocessor.process(input_array) # in: <NHWC> raw image batch , out: <NCHW> resized <N,3,608,608>
+        # trt_outputs = self._inference(pre) # out: [(N, 255, 19, 19), (N, 255, 38, 38), (N, 255, 76, 76)]
+        trt_outputs = self._inference(input_array) # out: [(N, 255, 19, 19), (N, 255, 38, 38), (N, 255, 76, 76)]
+        feat_batch = [[trt_outputs[j][i] for j in range(len(trt_outputs))] for i in range(len(trt_outputs[0]))]
+        post = [[self.postprocessor.process(feat,input_array.shape)]for feat in feat_batch] # out:[[bbox,score,categories,confidences],...]
+        post = post[:len(input_array)]
+        return post
+
+def unit_test():
+    input_image_path = 'debug_image/two_face.jpg'
+    
+    with open(input_image_path, 'rb') as infile:
+        image_raw = jpeg.decode(infile.read())
+        image_raw = image_raw[:,:,[2,1,0]]
+    image_raw = np.tile(image_raw,[1000,1,1,1])
+
+    yolo = YoloTRT()
+    batch_size = yolo.trt.max_batch_size
+    for i in range(0, len(image_raw), batch_size):
+        batch = image_raw[i:i+batch_size]
+        rs = yolo.inference(batch)
+        # print(len(rs),type(rs))
+    # print(len(rs[0][0]),type(rs[0][0]))
+    # print(rs[0][0])
+    profile.print_stats()
+
+def build_engine(FLAGS):
+    """Takes an ONNX file and creates a TensorRT engine to run inference with"""
+    onnx_file_path = FLAGS.onnx
+    TRT_LOGGER = trt.Logger()
+    with trt.Builder(TRT_LOGGER) as builder,\
+            builder.create_network() as network, \
+            trt.OnnxParser(network, TRT_LOGGER) as parser:
+
+        builder.max_workspace_size = FLAGS.vram* 1 << 30 # 1GB
+        builder.max_batch_size = FLAGS.max_batch_size
+
+        if FLAGS.precision == 'fp16':
+            # set to fp16 
+            print('force to fp16')
+            builder.fp16_mode = True
+            builder.strict_type_constraints = True
+        elif FLAGS.precision == 'int8':
+            # set to int8
+
+            pass
+            # builder.int8_mode = True
+
+            '''
+            NUM_IMAGES_PER_BATCH = 5 
+            batch = ImageBatchStream(NUM_IMAGES_PER_BATCH, calibration_files)
+            Int8_calibration = EntropyCalibrator(['input_node_name'],batchstream)
+            trt_builder.int8_calibrator = Int8_calibrator
+            '''
+        else:
+            pass
+
+        if not os.path.exists(onnx_file_path):
+            print('ONNX file {} not found, please run yolov3_to_onnx.py first to generate it.'.format(onnx_file_path))
+            exit(0)
+
+        print('Loading ONNX file from path {}...'.format(onnx_file_path))
+        with open(onnx_file_path, 'rb') as model:
+            print('Beginning ONNX file parsing')
+            parser.parse(model.read())
+        print('Completed parsing of ONNX file')
+
+        # setting output layer
+        # if FLAGS.onnx=="yolov3.onnx":
+        #     print(network.num_layers - 1)
+        #     output_1 = network.get_layer(82)
+        #     output_1 = network.get_layer(-1)
+        #     print(output_1)
+        #     # output_2 = network.get_layer(94)
+        #     # output_3 = network.get_layer(106)
+        #     # network.mark_output(output_1.get_output(0),output_2.get_output(0),output_3.get_output(0))
+        #     exit()
+        # else:
+        #     last_layer = network.get_layer(network.num_layers - 1)
+        #     network.mark_output(last_layer.get_output(0))
+
+
+        print('Building an engine from file {}; this may take a while...'.format(onnx_file_path))
+        engine = builder.build_cuda_engine(network)
+        print("Completed creating Engine")
+
+        engine_file_path = f'{onnx_file_path.split(".onnx")[0]}_batch_{FLAGS.max_batch_size}.trt'
+        with open(engine_file_path, "wb") as f:
+            f.write(engine.serialize())
+        return engine
+
+def main(FLAGS):
+    if FLAGS.build:
+        build_engine(FLAGS)
+    else:
+        unit_test()
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--build', action="store_true", required=False, default=False,
+                        help='Build model')
+    parser.add_argument('--vram', type=int, required=False,
+                        help='(Build mode) int - Suppose using VRAM size, recommand half of GPU memory.')
+    parser.add_argument('--max_batch_size', type=int, required=False,
+                        help='(Build mode) Max batch size for memalloc on GPU.')    
+    parser.add_argument('-p', '--precision', type=str, choices=['fp32', 'fp16', 'int8'],
+                        required=False, default='fp16',
+                        help='(Build mode) dtype precision')
+    parser.add_argument('--onnx', type=str,
+                        required=False, default='yolov3.onnx',
+                        help='(Build mode) ONNX model location')
+
+    FLAGS = parser.parse_args()
+
+    main(FLAGS)
+
+    # docker build -t yolotrt . 
+
+    # Unit test
+    # docker run -it --rm --runtime=nvidia yolotrt python3 refactor.py 
+
+    # Build engine
+    # docker run -it --rm --runtime=nvidia -v ${PWD}:/workshop -w /workshop   yolotrt python3 refactor.py --build --vram 6 --max_batch_size 64
