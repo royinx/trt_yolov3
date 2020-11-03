@@ -1,268 +1,344 @@
-from __future__ import print_function
+import os 
 
-import numpy as np
 import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
-# import asyncio
-
-from data_processing import PreprocessYOLO, PostprocessYOLO, ALL_CATEGORIES
-
-import sys, os
+from pycuda.compiler import SourceModule
+from pycuda import gpuarray
+import numpy as np
+import cv2
+from line_profiler import LineProfiler
 
 from common import *
-from turbojpeg import TurboJPEG
-from line_profiler import LineProfiler
-import time 
-from cuda_module import YoloResizeKer, TransNorKer
-
-jpeg = TurboJPEG()
+from data_processing import PostprocessYOLO
+from onnx_to_tensorrt import draw_bboxes
 
 profile = LineProfiler()
 
-frame_h, frame_w = 1080*2, 1920*2 # size of image placeholder ,  reserved for 4k image placeholder
-dst_h, dst_w = 608, 608 # resize image size to (608,608) = the size of yolo input 
+module = SourceModule("""
 
-class TensorRT(object):
-# class TensorRT(RootClass):
-    def __init__(self,engine_file):
-        super().__init__()
-        self.TRT_LOGGER = trt.Logger()
-        # self.engine = self.get_engine(engine_file)
-        # self.context = self.engine.create_execution_context()
-        # self.max_batch_size = self.engine.max_batch_size
-        self.max_batch_size = 40
-        self.allocate_buffers()
+__device__ float lerp1d(int a, int b, float w)
+{
+    if(b>a){
+        return a + w*(b-a);
+    }
+    else{
+        return b + w*(a-b);
+    }
+}
 
-    def get_engine(self, engine_file_path):
-        if os.path.exists(engine_file_path):
-            print("Reading engine from file {}".format(engine_file_path))
-            with open(engine_file_path, "rb") as f, \
-                trt.Runtime(self.TRT_LOGGER) as runtime:
-                return runtime.deserialize_cuda_engine(f.read())
+__device__ float lerp2d(int f00, int f01, int f10, int f11,
+                        float centroid_h, float centroid_w )
+{
+    centroid_w = (1 + lroundf(centroid_w) - centroid_w)/2;
+    centroid_h = (1 + lroundf(centroid_h) - centroid_h)/2;
+    
+    float r0, r1, r;
+    r0 = lerp1d(f00,f01,centroid_w);
+    r1 = lerp1d(f10,f11,centroid_w);
+
+    r = lerp1d(r0, r1, centroid_h); //+ 0.00001
+    return r;
+}
+
+__global__ void Transpose(unsigned char *odata, const unsigned char *idata)
+{
+    int H = blockDim.x * gridDim.x; // # dst_height
+    int W = blockDim.y * gridDim.y; // # dst_width 
+    int h = blockDim.x * blockIdx.x + threadIdx.x;  // 32 * bkIdx[0:18] + tdIdx; [0,607]   # x / h-th row
+    int w = blockDim.y * blockIdx.y + threadIdx.y;  // 32 * bkIdx[0:18] + tdIdx; [0,607]   # y / w-th col
+    int C = 3; // # ChannelDim
+    int c = blockIdx.z % 3 ; // [0,2] # ChannelIdx
+    int n = blockIdx.z / 3 ; // [0 , Batch size-1], # BatchIdx
+
+    long src_idx = n * (H * W * C) + 
+                    h * (W * C) +
+                    w * C +
+                    c;
+
+    long dst_idx = n * (C * H * W) +
+                    c * (H * W)+
+                    h * W+
+                    w;
+
+    odata[dst_idx] = idata[src_idx];
+}
+
+__global__ void Transpose_and_normalise(float *odata, const unsigned char *idata)
+{
+    int H = blockDim.x * gridDim.x; // # dst_height
+    int W = blockDim.y * gridDim.y; // # dst_width 
+    int h = blockDim.x * blockIdx.x + threadIdx.x;  // 32 * bkIdx[0:18] + tdIdx; [0,607]   # x / h-th row
+    int w = blockDim.y * blockIdx.y + threadIdx.y;  // 32 * bkIdx[0:18] + tdIdx; [0,607]   # y / w-th col
+    int C = 3; // # ChannelDim
+    int c = blockIdx.z % 3 ; // [0,2] # ChannelIdx
+    int n = blockIdx.z / 3 ; // [0 , Batch size-1], # BatchIdx
+
+    long src_idx = n * (H * W * C) + 
+                    h * (W * C) +
+                    w * C +
+                    c;
+
+    long dst_idx = n * (C * H * W) +
+                    c * (H * W)+
+                    h * W+
+                    w;
+
+    odata[dst_idx] = idata[src_idx]/255.0;
+}
+
+__global__ void YoloResize(unsigned char* dst_img, unsigned char* src_img, 
+                       int src_h, int src_w, 
+                       int frame_h, int frame_w, 
+                       float stride_h, float stride_w)
+{
+    int H = blockDim.x * gridDim.x; // # dst_height
+    int W = blockDim.y * gridDim.y; // # dst_width 
+    int h = blockDim.x * blockIdx.x + threadIdx.x;  // 32 * bkIdx[0:18] + tdIdx; [0,607]   # x / h-th row
+    int w = blockDim.y * blockIdx.y + threadIdx.y;  // 32 * bkIdx[0:18] + tdIdx; [0,607]   # y / w-th col
+    int C = 3; // # ChannelDim
+    int c = blockIdx.z % 3 ; // [0,2] # ChannelIdx
+    int n = blockIdx.z / 3 ; // [0 , Batch size-1], # BatchIdx
+    
+    int idx = n * (H * W * C) + 
+              h * (W * C) +
+              w * C +
+              c;
+
+    float centroid_h, centroid_w;  
+    centroid_h = stride_h * (h + 0.5); // h w c -> x, y, z : 1080 , 1920 , 3
+    centroid_w = stride_w * (w + 0.5); // 
+
+    int f00,f01,f10,f11;
+
+    int src_h_idx = lroundf(centroid_h)-1;
+    int src_w_idx = lroundf(centroid_w)-1;
+    if (src_h_idx<0){src_h_idx=0;}
+    if (src_w_idx<0){src_w_idx=0;}
+
+    f00 = n * frame_h * frame_w * C + 
+          src_h_idx * frame_w * C + 
+          src_w_idx * C +
+          c;
+    f01 = n * frame_h * frame_w * C +
+          src_h_idx * frame_w * C +
+          (src_w_idx+1) * C +
+          c;
+    f10 = n * frame_h * frame_w * C +
+          (src_h_idx+1) * frame_w * C +
+          src_w_idx * C +
+          c;
+    f11 = n * frame_h * frame_w * C + 
+          (src_h_idx+1) * frame_w * C +
+          (src_w_idx+1) * C +
+          c;
+          
+    int rs = lroundf(lerp2d(src_img[f00], src_img[f01], src_img[f10], src_img[f11], 
+                            centroid_h, centroid_w));
+
+    dst_img[idx] = (unsigned char)rs;
+}
+    """)
+
+# block = (32, 32, 1)   blockDim | threadIdx 
+# grid = (19,19,3))     gridDim  | blockIdx
+
+YoloResizeKer = module.get_function("YoloResize")
+TransposeKer = module.get_function("Transpose")
+TransNorKer = module.get_function("Transpose_and_normalise")
+
+# post processor
+postprocessor_args = {"yolo_masks": [(6, 7, 8), (3, 4, 5), (0, 1, 2)],                    
+                    "yolo_anchors": [(10, 13), (16, 30), (33, 23), (30, 61), (62, 45), 
+                                    (59, 119), (116, 90), (156, 198), (373, 326)],
+                    "obj_threshold": 0.5,
+                    "nms_threshold": 0.4,
+                    "yolo_input_resolution": (608, 608)}
+postprocessor = PostprocessYOLO(**postprocessor_args)
+
+
+# TRT init
+def get_engine(engine_file_path):
+    if os.path.exists(engine_file_path):
+        print("Reading engine from file {}".format(engine_file_path))
+        with open(engine_file_path, "rb") as f, \
+            trt.Runtime(TRT_LOGGER) as runtime:
+            return runtime.deserialize_cuda_engine(f.read())
+    else:
+        print("Cannot find .trt engine file.")
+        exit(0)
+
+TRT_LOGGER = trt.Logger()
+max_batch_size = 40
+engine = get_engine("yolov3.trt")
+context = engine.create_execution_context()
+max_batch_size = engine.max_batch_size
+bindings = []
+
+
+# run preprocess and inference
+@profile
+def gpu_resize(input_img: np.ndarray , stream: cuda.Stream):
+    """
+    Resize the batch image to (608,608) 
+    and Convert NHWC to NCHW
+    pass the gpu array to normalize the pixel ( divide by 255)
+
+    Application oriented
+
+    input_img : batch input, format: NHWC , recommend RGB. *same as the NN input format 
+                input must be 3 channel, kernel set ChannelDim as 3.
+    out : batch resized array, format: NCHW , same as intput channel
+    """
+    # ========= Init Params =========
+    # stream = cuda.Stream()
+
+    # convert to array
+    batch, src_h, src_w, channel = input_img.shape
+    dst_h, dst_w = 608, 608
+    frame_h, frame_w = 1080, 1920
+    assert (src_h <= frame_h) or (src_w <= frame_w)
+    # Mem Allocation
+    # input memory
+    
+    inp = {"host":cuda.pagelocked_zeros(shape=(batch,frame_h,frame_w,channel),
+                                        dtype=np.uint8,
+                                        mem_flags=cuda.host_alloc_flags.DEVICEMAP)}
+    inp["device"] = cuda.mem_alloc(inp["host"].nbytes)
+    
+
+
+    # output data
+    out = {"host":cuda.pagelocked_zeros(shape=(batch,dst_h,dst_w,channel), 
+                                    dtype=np.uint8,
+                                    mem_flags=cuda.host_alloc_flags.DEVICEMAP)}
+    out["device"] = cuda.mem_alloc(out["host"].nbytes)
+    cuda.memcpy_htod_async(out["device"], out["host"],stream)
+
+
+    #Transpose (and Normalize)
+    trans = {"host":cuda.pagelocked_zeros(shape=(batch,channel,dst_h,dst_w), 
+                                            dtype=np.float32,
+                                            mem_flags=cuda.host_alloc_flags.DEVICEMAP)}  # N C H W
+    trans["device"] = cuda.mem_alloc(trans["host"].nbytes)
+    cuda.memcpy_htod_async(trans["device"], trans["host"],stream)
+    
+    
+    # YoloOutput
+    # yolo_out = {"host":cuda.pagelocked_zeros(shape=(batch,channel,dst_h,dst_w), 
+    #                                         dtype=np.float32,
+    #                                         mem_flags=cuda.host_alloc_flags.DEVICEMAP)}  # N C H W
+    # yolo_out["device"] = cuda.mem_alloc(yolo_out["host"].nbytes)
+    # cuda.memcpy_htod_async(yolo_out["device"], yolo_out["host"],stream)
+
+
+    outputs = []
+    for binding in engine:
+        size = trt.volume(engine.get_binding_shape(binding)) * max_batch_size
+        dtype = trt.nptype(engine.get_binding_dtype(binding))
+        host_mem = cuda.pagelocked_empty(size, dtype)
+        device_mem = cuda.mem_alloc(host_mem.nbytes)
+        if engine.binding_is_input(binding):
+            bindings.append(int(trans["device"]))
         else:
-            print("Cannot find .trt engine file.")
-            exit(0)
+            bindings.append(int(device_mem))
+            outputs.append(HostDeviceMem(host_mem, device_mem))
 
-    def allocate_buffers(self, input_shape=(1080,1920,3)):
-        self.outputs = []
-        self.bindings = []
-        self.stream = cuda.Stream()
+    
+    # init resize , store kernel in cache
+    
+    YoloResizeKer(out["device"], inp["device"], 
+               np.int32(src_h), np.int32(src_w),
+               np.int32(frame_h), np.int32(frame_w),
+               np.float32(src_h/dst_h), np.float32(src_w/dst_w),
+               block=(32, 32, 1),
+               grid=(19,19,3*batch),
+               stream=stream)
 
-        input_host_mem = cuda.pagelocked_zeros(shape=(self.max_batch_size,
-                                                      input_shape[0], # H
-                                                      input_shape[1], # W
-                                                      input_shape[2]), # C
-                                                dtype=np.uint8,
-                                                mem_flags=cuda.host_alloc_flags.DEVICEMAP)
-        input_device_mem = cuda.mem_alloc(input_host_mem.nbytes)
-        self.inputs = HostDeviceMem(input_host_mem, input_device_mem)
+    # init the output shape 
+    output_shapes = [(max_batch_size, 255, 19, 19), 
+                    (max_batch_size, 255, 38, 38), 
+                    (max_batch_size, 255, 76, 76)]
 
-        trans_bytes = np.zeros((self.max_batch_size,dst_h,dst_w,3),dtype=np.single).nbytes
-
-        self.trans = cuda.mem_alloc(trans_bytes)
-
-        # for binding in self.engine:
-        #     size = trt.volume(self.engine.get_binding_shape(binding)) * self.max_batch_size
-        #     dtype = trt.nptype(self.engine.get_binding_dtype(binding))
-        #     host_mem = cuda.pagelocked_empty(size, dtype)
-        #     device_mem = cuda.mem_alloc(host_mem.nbytes)
-
-        #     self.bindings.append(int(device_mem))
-        #     # print(bindings)
-        #     # Append to the appropriate list.
-        #     if self.engine.binding_is_input(binding):
-        #         self.yolo_inputs = device_mem
-        #     else:
-        #         self.outputs.append(HostDeviceMem(host_mem, device_mem))
-
-        # return inputs, outputs, bindings, stream
+    # ========= Testing =========
     @profile
-    def inference(self,inputs:np.ndarray) -> list: # input: <NCHW>
-        # self.inputs[0].host = inputs
-        _ ,src_h ,src_w ,_ = inputs.shape
-        self.inputs.host[:,:src_h,:src_w,:] = inputs
-        cuda.memcpy_htod_async(self.inputs.device, self.inputs.host, self.stream)
-        # cuda.memcpy_htod_async(out["device"], out["host"],stream)
-        # cuda.memcpy_htod_async(out["device"], out["host"],stream)
-
-        # [cuda.memcpy_htod_async(inp.device, inp.host, self.stream) for inp in self.inputs]
-        
-        print(self.max_batch_size)
-        YoloResizeKer(self.inputs.device, self.trans, 
+    def inf():
+        inp["host"][:,:src_h,:src_w,:] = input_img
+        cuda.memcpy_htod_async(inp["device"], inp["host"],stream)
+        YoloResizeKer(out["device"], inp["device"],
                         np.int32(src_h), np.int32(src_w),
                         np.int32(frame_h), np.int32(frame_w),
                         np.float32(src_h/dst_h), np.float32(src_w/dst_w),
                         block=(32, 32, 1),
-                        grid=(19,19,3*self.max_batch_size),
-                        stream=self.stream)
-        """
-        TransNorKer(self.yolo_inputs,self.trans,
+                        grid=(19,19,3*batch),
+                        stream=stream)
+
+        # ========= Copy out result =========
+
+        TransNorKer(trans["device"],out["device"],
                     block=(32, 32, 1),
-                    grid=(19,19,3*self.max_batch_size))
+                    grid=(19,19,3*batch))
 
 
-        self.context.execute_async(batch_size=self.max_batch_size, 
-                                   bindings=self.bindings, 
-                                   stream_handle=self.stream.handle)
-        [cuda.memcpy_dtoh_async(out.host, out.device, self.stream) for out in self.outputs]
-        """
-        self.stream.synchronize()
-        return [out.host for out in self.outputs]
+        context.execute_async(batch_size=max_batch_size, 
+                                bindings=bindings, 
+                                stream_handle=stream.handle)
 
-class YoloTRT(object):
-    def __init__(self):
-        super().__init__()
-        # resolution
-        # self.preprocessor = PreprocessYOLO((608, 608))
-        self.trt = TensorRT("yolov3.trt")
-        postprocessor_args = {"yolo_masks": [(6, 7, 8), (3, 4, 5), (0, 1, 2)],                    
-                          "yolo_anchors": [(10, 13), (16, 30), (33, 23), (30, 61), (62, 45), 
-                                           (59, 119), (116, 90), (156, 198), (373, 326)],
-                          "obj_threshold": 0.6,
-                          "nms_threshold": 0.5,
-                          "yolo_input_resolution": (608, 608)}
-        self.postprocessor = PostprocessYOLO(**postprocessor_args)
-        
-    def _preprocess(self, input_array:np.ndarray):
 
-        return
+        [cuda.memcpy_dtoh_async(out.host, out.device, stream) for out in outputs]
 
-    def _inference(self, input: np.ndarray) -> list: # 
-        trt_outputs = self.trt.inference(input)
-        output_shapes = [(self.trt.max_batch_size, 255, 19, 19), 
-                         (self.trt.max_batch_size, 255, 38, 38), 
-                         (self.trt.max_batch_size, 255, 76, 76)]
-                         
+
+        stream.synchronize()
+
+        trt_outputs = [out.host for out in outputs]
+        # for i in trt_outputs:
+            # print(i.shape)
+        # print(1)
         trt_outputs = [output.reshape(shape) for output, shape in zip(trt_outputs, output_shapes)]  # [(1, 255, 19, 19), (1, 255, 38, 38), (1, 255, 76, 76)]
-        return trt_outputs # in: <NCHW> <N,3,608,608>, out: [(N, 255, 19, 19), (N, 255, 38, 38), (N, 255, 76, 76)]
 
-    # def _postprocess(self, feat_batch, shape_orig_WH:tuple): 
-    #     return [[self.postprocessor.process(feat,shape_orig)]for feat, shape_orig in zip(feat_batch,shape_orig_WH)]
-
-    @profile
-    def inference(self, input_array:np.ndarray): # img_array <N,H,W,C>
-        # pre = self.preprocessor.process(input_array) # in: <NHWC> raw image batch , out: <NCHW> resized <N,3,608,608>
-        # trt_outputs = self._inference(pre) # out: [(N, 255, 19, 19), (N, 255, 38, 38), (N, 255, 76, 76)]
-        trt_outputs = self._inference(input_array) # out: [(N, 255, 19, 19), (N, 255, 38, 38), (N, 255, 76, 76)]
         feat_batch = [[trt_outputs[j][i] for j in range(len(trt_outputs))] for i in range(len(trt_outputs[0]))]
-        post = [[self.postprocessor.process(feat,input_array.shape)]for feat in feat_batch] # out:[[bbox,score,categories,confidences],...]
-        post = post[:len(input_array)]
+        post = [[postprocessor.process(feat,input_img.shape)]for feat in feat_batch] # out:[[bbox,score,categories,confidences],...]
+        post = post[:len(input_img)]
+
         return post
 
-def unit_test():
-    input_image_path = 'debug_image/two_face.jpg'
+    # for _ in range(24):
+    #     inf()
+    return inf()
+
+if __name__ == "__main__":
+    # init
+    stream = cuda.Stream()
+
+    grid = 19
+    block = 32
+    batch = 2
+
+    # img = cv2.resize(cv2.imread("trump.jpg"),(1920,1080))
+    # img = cv2.imread("trump.jpg")
+    # img = np.tile(img,[batch,1,1,1])
+
+    # img = np.zeros(shape=(3,1080,1920,3),dtype = np.uint8)
+    # img[0,:48,:64,:] = cv2.resize(cv2.imread("trump.jpg"),(64,48))
+    # img[1,:480,:640,:] = cv2.resize(cv2.imread("trump.jpg"),(640,480))
+    # img[2,:1080,:1920,:] = cv2.resize(cv2.imread("trump.jpg"),(1920,1080))
+
+    batch = 40
+    # img_batch_0 = np.tile(cv2.resize(cv2.imread("trump.jpg"),(64,48)),[batch,1,1,1])
+    # img_batch_1 = np.tile(cv2.resize(cv2.imread("trump.jpg"),(320,240)),[batch,1,1,1])
+    # img_batch_2 = np.tile(cv2.imread("debug_image/two_face.jpg"),[batch,1,1,1])
+    # img_batch_2 = np.tile(cv2.imread("debug_image/crowd.jpg"),[batch,1,1,1])
+    img_batch_2 = np.tile(cv2.resize(cv2.imread("debug_image/crowd.jpg"),(1920,1080)),[batch,1,1,1])
+    # pix_0 = gpu_resize(img_batch_0)
+    # pix_1 = gpu_resize(img_batch_1)
+    pix_2 = gpu_resize(img_batch_2,stream = stream)
     
-    with open(input_image_path, 'rb') as infile:
-        image_raw = jpeg.decode(infile.read())
-        image_raw = image_raw[:,:,[2,1,0]]
-    image_raw = np.tile(image_raw,[1000,1,1,1])
+    # ======  Draw the result ======
+    # im = img_batch_2[0]
+    # for feat in pix_2[0][0]:
+    #     x1,y1,x2,y2,_,_ = feat.astype(np.int16)
+    #     im = cv2.rectangle(im, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    # cv2.imwrite("pycuda_outpuut.jpg", im)
 
-    yolo = YoloTRT()
-    batch_size = yolo.trt.max_batch_size
-    for i in range(0, len(image_raw), batch_size):
-        batch = image_raw[i:i+batch_size]
-        rs = yolo.inference(batch)
-        # print(len(rs),type(rs))
-    # print(len(rs[0][0]),type(rs[0][0]))
-    # print(rs[0][0])
-    profile.print_stats()
-
-def build_engine(FLAGS):
-    """Takes an ONNX file and creates a TensorRT engine to run inference with"""
-    onnx_file_path = FLAGS.onnx
-    TRT_LOGGER = trt.Logger()
-    with trt.Builder(TRT_LOGGER) as builder,\
-            builder.create_network() as network, \
-            trt.OnnxParser(network, TRT_LOGGER) as parser:
-
-        builder.max_workspace_size = FLAGS.vram* 1 << 30 # 1GB
-        builder.max_batch_size = FLAGS.max_batch_size
-
-        if FLAGS.precision == 'fp16':
-            # set to fp16 
-            print('force to fp16')
-            builder.fp16_mode = True
-            builder.strict_type_constraints = True
-        elif FLAGS.precision == 'int8':
-            # set to int8
-
-            pass
-            # builder.int8_mode = True
-
-            '''
-            NUM_IMAGES_PER_BATCH = 5 
-            batch = ImageBatchStream(NUM_IMAGES_PER_BATCH, calibration_files)
-            Int8_calibration = EntropyCalibrator(['input_node_name'],batchstream)
-            trt_builder.int8_calibrator = Int8_calibrator
-            '''
-        else:
-            pass
-
-        if not os.path.exists(onnx_file_path):
-            print('ONNX file {} not found, please run yolov3_to_onnx.py first to generate it.'.format(onnx_file_path))
-            exit(0)
-
-        print('Loading ONNX file from path {}...'.format(onnx_file_path))
-        with open(onnx_file_path, 'rb') as model:
-            print('Beginning ONNX file parsing')
-            parser.parse(model.read())
-        print('Completed parsing of ONNX file')
-
-        # setting output layer
-        # if FLAGS.onnx=="yolov3.onnx":
-        #     print(network.num_layers - 1)
-        #     output_1 = network.get_layer(82)
-        #     output_1 = network.get_layer(-1)
-        #     print(output_1)
-        #     # output_2 = network.get_layer(94)
-        #     # output_3 = network.get_layer(106)
-        #     # network.mark_output(output_1.get_output(0),output_2.get_output(0),output_3.get_output(0))
-        #     exit()
-        # else:
-        #     last_layer = network.get_layer(network.num_layers - 1)
-        #     network.mark_output(last_layer.get_output(0))
-
-
-        print('Building an engine from file {}; this may take a while...'.format(onnx_file_path))
-        engine = builder.build_cuda_engine(network)
-        print("Completed creating Engine")
-
-        engine_file_path = f'{onnx_file_path.split(".onnx")[0]}_batch_{FLAGS.max_batch_size}.trt'
-        with open(engine_file_path, "wb") as f:
-            f.write(engine.serialize())
-        return engine
-
-def main(FLAGS):
-    if FLAGS.build:
-        build_engine(FLAGS)
-    else:
-        unit_test()
-
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--build', action="store_true", required=False, default=False,
-                        help='Build model')
-    parser.add_argument('--vram', type=int, required=False,
-                        help='(Build mode) int - Suppose using VRAM size, recommand half of GPU memory.')
-    parser.add_argument('--max_batch_size', type=int, required=False,
-                        help='(Build mode) Max batch size for memalloc on GPU.')    
-    parser.add_argument('-p', '--precision', type=str, choices=['fp32', 'fp16', 'int8'],
-                        required=False, default='fp16',
-                        help='(Build mode) dtype precision')
-    parser.add_argument('--onnx', type=str,
-                        required=False, default='yolov3.onnx',
-                        help='(Build mode) ONNX model location')
-
-    FLAGS = parser.parse_args()
-
-    main(FLAGS)
-
-    # docker build -t yolotrt . 
-
-    # Unit test
-    # docker run -it --rm --runtime=nvidia yolotrt python3 refactor.py 
-
-    # Build engine
-    # docker run -it --rm --runtime=nvidia -v ${PWD}:/workshop -w /workshop   yolotrt python3 refactor.py --build --vram 6 --max_batch_size 64
+    # ====== Benchmarking ======
+    # profile.print_stats()

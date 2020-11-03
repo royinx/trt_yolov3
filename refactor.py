@@ -14,6 +14,7 @@ from common import *
 from turbojpeg import TurboJPEG
 from line_profiler import LineProfiler
 import time 
+import cv2
 
 jpeg = TurboJPEG()
 
@@ -112,12 +113,13 @@ class YoloTRT(object):
         return post
 
 def unit_test():
-    input_image_path = 'debug_image/two_face.jpg'
+    input_image_path = 'debug_image/crowd.jpg'
     
     with open(input_image_path, 'rb') as infile:
         image_raw = jpeg.decode(infile.read())
         image_raw = image_raw[:,:,[2,1,0]]
-    image_raw = np.tile(image_raw,[400,1,1,1])
+        image_raw = cv2.resize(image_raw,(1920,1080))
+    image_raw = np.tile(image_raw,[1000,1,1,1])
 
     yolo = YoloTRT()
     batch_size = yolo.trt.max_batch_size

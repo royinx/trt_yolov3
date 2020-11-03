@@ -1,5 +1,5 @@
 pull container 19.02 py2 / 19.12 py3
- 
+
 ``` shell
 docker pull nvcr.io/nvidia/tensorrt:19.02-py2
 docker pull nvcr.io/nvidia/tensorrt:19.12-py3
@@ -9,6 +9,13 @@ docker pull nvcr.io/nvidia/tensorrt:19.12-py3
 ```shell
 docker build -t trt_yolov3 .
 docker run -it --rm --runtime=nvidia -v $PWD:/workshop -w /workshop trt_yolov3 python3 refactor.py --build --vram 6 --max_batch_size 64
+
+# CUDA resize + CUDA trt inf + CPU nms
+git checkout resize
+docker run -it --rm --runtime=nvidia -v $PWD:/workshop -w /workshop trt_yolov3 bash
+python3 gpu_resize_inference.py
+# CPU cv2.resize + CUDA trt inf + CPU nms
+python3 refactor.py
 
 ```
 
