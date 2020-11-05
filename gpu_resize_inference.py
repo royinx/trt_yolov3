@@ -197,7 +197,7 @@ def gpu_resize(input_img: np.ndarray , stream: cuda.Stream):
     batch, src_h, src_w, channel = input_img.shape
     dst_h, dst_w = 608, 608
     frame_h, frame_w = 1080, 1920
-    assert (src_h <= frame_h) or (src_w <= frame_w)
+    assert (src_h <= frame_h) and (src_w <= frame_w)
     # Mem Allocation
     # input memory
     
